@@ -14,11 +14,14 @@ st.set_page_config(
 
 def get_base64_of_bin_file(bin_file):
     """Mã hóa ảnh sang base64 để nhúng trực tiếp vào HTML"""
-    with open(bin_file, 'rb') as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+    try:
+        with open(bin_file, 'rb') as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except Exception as e:
+        return None
 
-# 2. Custom CSS (Cập nhật kích thước cực đại cho tên công ty)
+# 2. Custom CSS
 st.markdown("""
 <style>
 :root {
@@ -58,7 +61,7 @@ st.markdown("""
 
 .company-name-line {
     color: var(--pvoil-red);
-    font-size: 54px; /* ĐÃ TĂNG THÊM 50% so với bản trước */
+    font-size: 54px;
     font-weight: 900;
     text-transform: uppercase;
     margin: 0;
@@ -144,13 +147,11 @@ else:
         if st.button("🚪 Đăng xuất", use_container_width=True):
             logout()
 
-    # --- KHU VỰC NỘI DUNG CHÍNH (Sửa lỗi hiển thị mã nguồn) ---
+    # --- KHU VỰC NỘI DUNG CHÍNH ---
     logo_header_path = "assets/logo2.png"
+    img_base64 = get_base64_of_bin_file(logo_header_path)
     
-    if os.path.exists(logo_header_path):
-        img_base64 = get_base64_of_bin_file(logo_header_path)
-        
-        # LƯU Ý: Không thụt đầu dòng bên trong chuỗi f-string này để tránh lỗi hiển thị mã nguồn
+    if img_base64:
         html_header = f"""
 <div class="header-master-container">
 <div class="header-top-row">
@@ -171,7 +172,14 @@ else:
 """
         st.markdown(html_header, unsafe_allow_html=True)
     else:
-        st.warning("Vui lòng kiểm tra file assets/logo2.png")
+        # CHẾ ĐỘ CHẨN ĐOÁN LỖI LOGO
+        st.error(f"⚠️ Không tìm thấy file: `{logo_header_path}`")
+        if os.path.exists("assets"):
+            files = os.listdir("assets")
+            st.info(f"Các file hiện có trong thư mục assets: {files}")
+            st.warning("Gợi ý: Kiểm tra xem tên file trên GitHub có viết hoa chữ cái đầu (Logo2.png) hay không.")
+        else:
+            st.error("Thư mục `assets/` không tồn tại trên hệ thống!")
 
     # --- ĐIỀU HƯỚNG MODULE ---
     if menu == "Chấm công":
