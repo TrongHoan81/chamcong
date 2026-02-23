@@ -15,13 +15,15 @@ st.set_page_config(
 def get_base64_of_bin_file(bin_file):
     """Mã hóa ảnh sang base64 để nhúng trực tiếp vào HTML"""
     try:
-        with open(bin_file, 'rb') as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    except Exception as e:
+        if os.path.exists(bin_file):
+            with open(bin_file, 'rb') as f:
+                data = f.read()
+            return base64.b64encode(data).decode()
+        return None
+    except Exception:
         return None
 
-# 2. Custom CSS
+# 2. Custom CSS (Thiết kế phong cách PVOIL - Tên công ty 54px)
 st.markdown("""
 <style>
 :root {
@@ -51,7 +53,7 @@ st.markdown("""
 }
 
 .header-logo-img {
-    height: 130px;
+    height: 140px;
     width: auto;
 }
 
@@ -122,7 +124,8 @@ else:
     role = user.get('Role', 'Guest')
     
     with st.sidebar:
-        logo_sidebar = "assets/logo1.png"
+        # Sửa lỗi Case Sensitivity: Logo1.png
+        logo_sidebar = "assets/Logo1.png"
         if os.path.exists(logo_sidebar):
             st.image(logo_sidebar, use_container_width=True)
         else:
@@ -147,11 +150,13 @@ else:
         if st.button("🚪 Đăng xuất", use_container_width=True):
             logout()
 
-    # --- KHU VỰC NỘI DUNG CHÍNH ---
-    logo_header_path = "assets/logo2.png"
+    # --- KHU VỰC NỘI DUNG CHÍNH (Đã sửa lỗi hiển thị và Case Sensitivity) ---
+    # Sửa lỗi Case Sensitivity: Logo2.png
+    logo_header_path = "assets/Logo2.png"
     img_base64 = get_base64_of_bin_file(logo_header_path)
     
     if img_base64:
+        # LƯU Ý: Tuyệt đối không thụt lề HTML bên dưới
         html_header = f"""
 <div class="header-master-container">
 <div class="header-top-row">
@@ -172,14 +177,8 @@ else:
 """
         st.markdown(html_header, unsafe_allow_html=True)
     else:
-        # CHẾ ĐỘ CHẨN ĐOÁN LỖI LOGO
-        st.error(f"⚠️ Không tìm thấy file: `{logo_header_path}`")
-        if os.path.exists("assets"):
-            files = os.listdir("assets")
-            st.info(f"Các file hiện có trong thư mục assets: {files}")
-            st.warning("Gợi ý: Kiểm tra xem tên file trên GitHub có viết hoa chữ cái đầu (Logo2.png) hay không.")
-        else:
-            st.error("Thư mục `assets/` không tồn tại trên hệ thống!")
+        # Fallback nếu vẫn lỗi đường dẫn
+        st.warning(f"Không tìm thấy tài nguyên hình ảnh tại {logo_header_path}")
 
     # --- ĐIỀU HƯỚNG MODULE ---
     if menu == "Chấm công":
