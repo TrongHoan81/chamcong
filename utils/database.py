@@ -6,8 +6,31 @@ from datetime import datetime
 import numpy as np
 import json
 import os
+import time
+from functools import wraps
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+
+def retry_api_call(max_retries=5):
+    """Decorator thực hiện exponential backoff cho các cuộc gọi API gspread"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            while retries <= max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except gspread.exceptions.APIError as e:
+                    # Kiểm tra nếu lỗi là 429 (Quota Exceeded)
+                    if "429" in str(e) and retries < max_retries:
+                        wait_time = 2 ** retries # 1s, 2s, 4s, 8s, 16s
+                        time.sleep(wait_time)
+                        retries += 1
+                        continue
+                    raise e
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 class Database:
     def __init__(self, credentials_path, master_file_name):
@@ -24,24 +47,30 @@ class Database:
             self.att_sh = None
             self.loaded_year = None
         except Exception as e:
-            st.error(f"Lỗi kết nối: {e}")
+            st.error(f"Lỗi kết nối Google Sheets: {e}")
 
-    # --- NHÓM HÀM MASTER DATA (Dùng cho HR/Admin) ---
-    def get_master_data(self, sheet_name):
+    # --- NHÓM HÀM MASTER DATA (Có Caching) ---
+    @st.cache_data(ttl=600) # Lưu cache 10 phút để tránh gọi API liên tục
+    def get_master_data(_self, sheet_name):
+        """Lấy dữ liệu danh mục với cơ chế lưu nháp vào bộ nhớ"""
+        return _self._fetch_master_from_api(sheet_name)
+
+    @retry_api_call()
+    def _fetch_master_from_api(self, sheet_name):
+        """Hàm thực thi gọi API thực tế"""
         worksheet = self.master_sh.worksheet(sheet_name)
         return pd.DataFrame(worksheet.get_all_records())
 
+    @retry_api_call()
     def update_employee(self, employee_id, updated_data):
-        """Cập nhật hoặc thêm mới nhân viên vào Master Data"""
+        """Cập nhật nhân viên và xóa cache để dữ liệu mới được hiển thị"""
         try:
             worksheet = self.master_sh.worksheet("Employees")
             df = pd.DataFrame(worksheet.get_all_records())
             
             if employee_id in df['Employee_ID'].values:
-                # Tìm dòng và cập nhật
                 cell = worksheet.find(str(employee_id))
                 row_idx = cell.row
-                # Giả sử cấu hình cột: ID, Name, Unit, Position, Status, Join_Date
                 new_row = [
                     updated_data['Employee_ID'], updated_data['Full_Name'],
                     updated_data['Unit_Name'], updated_data['Position_ID'],
@@ -49,19 +78,22 @@ class Database:
                 ]
                 worksheet.update(f"A{row_idx}:F{row_idx}", [new_row])
             else:
-                # Thêm mới
                 new_row = [
                     updated_data['Employee_ID'], updated_data['Full_Name'],
                     updated_data['Unit_Name'], updated_data['Position_ID'],
                     updated_data['Status'], updated_data['Join_Date']
                 ]
                 worksheet.append_row(new_row)
+            
+            # Xóa cache để lần gọi tới sẽ tải dữ liệu mới
+            st.cache_data.clear()
             return True
         except Exception as e:
             st.error(f"Lỗi cập nhật nhân sự: {e}")
             return False
 
     # --- NHÓM HÀM CHẤM CÔNG ---
+    @retry_api_call()
     def get_available_years(self):
         try:
             all_sh = self.client.openall()
@@ -77,6 +109,7 @@ class Database:
             return self.att_sh
         except: return None
 
+    @retry_api_call()
     def get_attendance_data(self, year, month, unit_name):
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
@@ -84,11 +117,15 @@ class Database:
         df = pd.DataFrame(worksheet.get_all_records())
         return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name)]
 
+    @retry_api_call()
     def save_attendance(self, df_to_save, year, month, unit_name):
         sh = self._open_att_file(year)
         if not sh: return False
         worksheet = sh.worksheet("Attendance_Data")
-        all_data = pd.DataFrame(worksheet.get_all_records())
+        
+        # Đọc dữ liệu cũ để gộp
+        all_data_records = worksheet.get_all_records()
+        all_data = pd.DataFrame(all_data_records)
         
         calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
         cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
