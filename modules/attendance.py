@@ -32,16 +32,15 @@ def render_attendance_interface(db, user_info):
     
     st.header(f"Bảng chấm công")
     
-    # 1. Bộ chọn Tháng/Năm - Đưa vào container để tránh rerun thừa
-    with st.container():
-        available_years = db.get_available_years()
-        col_m, col_y, _ = st.columns([2, 1, 4])
-        with col_y:
-            year = st.selectbox("Chọn năm", available_years, index=0)
-        with col_m:
-            month = st.selectbox("Chọn tháng chấm công", range(1, 13), index=datetime.now().month - 1)
+    # 1. Bộ chọn Tháng/Năm
+    available_years = db.get_available_years()
+    col_m, col_y, _ = st.columns([2, 1, 4])
+    with col_y:
+        year = st.selectbox("Chọn năm", available_years, index=0)
+    with col_m:
+        month = st.selectbox("Chọn tháng chấm công", range(1, 13), index=datetime.now().month - 1)
 
-    # 2. Lấy dữ liệu Master (Đã có Cache trong db.get_master_data)
+    # 2. Lấy dữ liệu Master
     employees_df = db.get_master_data("Employees")
     units_df = db.get_master_data("Units")
     
@@ -56,7 +55,7 @@ def render_attendance_interface(db, user_info):
 
     is_owner = (unit_name == my_unit) or (role == 'Admin')
 
-    # 4. Truy xuất dữ liệu chấm công
+    # 4. Truy xuất dữ liệu
     num_days = get_days_in_month(year, month)
     active_days = [f"d{i}" for i in range(1, num_days + 1)]
     existing_att = db.get_attendance_data(year, month, unit_name)
@@ -64,15 +63,20 @@ def render_attendance_interface(db, user_info):
     status = "Draft"
     if not existing_att.empty:
         display_df = existing_att.copy()
-        status = existing_att['Status'].iloc[0]
+        status = display_df['Status'].iloc[0]
     else:
-        # Lọc nhân viên theo đơn vị (Thực hiện trên DataFrame local thay vì gọi API)
         unit_employees = employees_df[(employees_df['Unit_Name'] == unit_name) & (employees_df['Status'] != 'Terminated')]
         display_df = pd.DataFrame()
         display_df['Employee_ID'] = unit_employees['Employee_ID'].astype(str)
         display_df['Employee_Name'] = unit_employees['Full_Name']
+        display_df['Position_ID'] = unit_employees['Position_ID']
         for i in range(1, 32): display_df[f"d{i}"] = ""
         display_df['Status'] = "Draft"
+
+    # Đảm bảo cột Position_ID luôn tồn tại (lấy từ master nếu data cũ không có)
+    if 'Position_ID' not in display_df.columns:
+        pos_lookup = employees_df[['Employee_ID', 'Position_ID']].drop_duplicates('Employee_ID')
+        display_df = display_df.merge(pos_lookup, on='Employee_ID', how='left')
 
     is_locked = (status in ["Submitted", "Approved"])
     can_edit = is_owner and not is_locked and (role != 'Accountant')
@@ -89,12 +93,12 @@ def render_attendance_interface(db, user_info):
     column_config = {
         "Employee_ID": st.column_config.TextColumn("Mã NV", disabled=True),
         "Employee_Name": st.column_config.TextColumn("Họ tên", disabled=True),
+        "Position_ID": st.column_config.TextColumn("Chức danh", disabled=True),
         "Status": st.column_config.TextColumn("Trạng thái", disabled=True),
     }
     
     for i in range(1, num_days + 1):
-        label = f"{i:02d} ({get_weekday_name(year, month, i)})"
-        if is_weekend(year, month, i): label += " 🔴"
+        label = f"{i:02d}"
         column_config[f"d{i}"] = st.column_config.SelectboxColumn(
             label=label, 
             options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L"], 
@@ -103,7 +107,7 @@ def render_attendance_interface(db, user_info):
         )
 
     edited_df = st.data_editor(
-        display_df[['Employee_ID', 'Employee_Name'] + active_days + ['Status']], 
+        display_df[['Employee_ID', 'Employee_Name', 'Position_ID'] + active_days + ['Status']], 
         column_config=column_config, 
         hide_index=True, 
         use_container_width=True,
@@ -119,7 +123,7 @@ def render_attendance_interface(db, user_info):
     st.subheader("📊 Báo cáo tổng hợp")
     st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-    # 7. Hệ thống nút thao tác & Xuất PDF
+    # 7. Nút thao tác & Xuất PDF
     st.divider()
     c1, c2, c3, c4, c5 = st.columns([1, 1.2, 1, 1, 1.5])
     
@@ -131,7 +135,7 @@ def render_attendance_interface(db, user_info):
         for col in target_cols: save_df[col] = summary_res[col]
         save_df['Year'], save_df['Month'], save_df['Unit_Name'], save_df['Status'] = year, month, unit_name, new_status
         if db.save_attendance(save_df, year, month, unit_name):
-            st.success(f"Đã cập nhật trạng thái: {new_status}"); st.rerun()
+            st.success(f"Đã cập nhật!"); st.rerun()
 
     if status == "Draft" and is_owner:
         with c1: 
@@ -139,9 +143,7 @@ def render_attendance_interface(db, user_info):
         with c2: 
             if st.button("🚀 Gửi phê duyệt", use_container_width=True): handle_save("Submitted")
     
-    is_high_level = role in ['Admin', 'Salary_Admin', 'HR_Director']
-    
-    if is_high_level:
+    if role in ['Admin', 'Salary_Admin', 'HR_Director']:
         if status == "Submitted":
             with c1:
                 if st.button("✅ Phê duyệt", use_container_width=True, type="primary"): handle_save("Approved")
@@ -152,6 +154,7 @@ def render_attendance_interface(db, user_info):
                 if st.button("🔓 Mở sửa lại", use_container_width=True): handle_save("Draft")
 
     with c5:
+        # Chuẩn bị dữ liệu PDF (KHÔNG dùng drop_duplicates ở đây theo yêu cầu)
         pdf_data = pd.concat([edited_df.reset_index(drop=True), calc_df], axis=1)
         pdf_bytes = export_attendance_pdf(pdf_data, unit_name, month, year, status)
         
