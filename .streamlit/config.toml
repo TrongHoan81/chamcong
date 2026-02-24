@@ -1,0 +1,16 @@
+[server]
+# Cấu hình cổng và địa chỉ để chạy ổn định trên các môi trường cloud như Render
+port = 8501
+address = "0.0.0.0"
+headless = true
+
+[browser]
+# Tắt thông báo thu thập dữ liệu thống kê của Streamlit
+gatherUsageStats = false
+
+[theme]
+# Bạn có thể cấu hình màu sắc thương hiệu PVOIL tại đây nếu muốn
+primaryColor = "#ed1c24"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f5f9"
+textColor = "#1e293b"

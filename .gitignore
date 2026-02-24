@@ -1,5 +1,4 @@
 credentials.json
 pycache/
-.streamlit/
 *.pyc
 venv/
