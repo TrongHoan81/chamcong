@@ -12,7 +12,6 @@ from functools import wraps
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
 def retry_api_call(max_retries=5):
-    """Decorator thực hiện exponential backoff cho các cuộc gọi API gspread"""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -21,10 +20,8 @@ def retry_api_call(max_retries=5):
                 try:
                     return func(*args, **kwargs)
                 except gspread.exceptions.APIError as e:
-                    # Kiểm tra nếu lỗi là 429 (Quota Exceeded)
                     if "429" in str(e) and retries < max_retries:
-                        wait_time = 2 ** retries # 1s, 2s, 4s, 8s, 16s
-                        time.sleep(wait_time)
+                        time.sleep(2 ** retries)
                         retries += 1
                         continue
                     raise e
@@ -49,50 +46,58 @@ class Database:
         except Exception as e:
             st.error(f"Lỗi kết nối Google Sheets: {e}")
 
-    # --- NHÓM HÀM MASTER DATA (Có Caching) ---
-    @st.cache_data(ttl=600) # Lưu cache 10 phút để tránh gọi API liên tục
+    @st.cache_data(ttl=600)
     def get_master_data(_self, sheet_name):
-        """Lấy dữ liệu danh mục với cơ chế lưu nháp vào bộ nhớ"""
         return _self._fetch_master_from_api(sheet_name)
 
     @retry_api_call()
     def _fetch_master_from_api(self, sheet_name):
-        """Hàm thực thi gọi API thực tế"""
         worksheet = self.master_sh.worksheet(sheet_name)
-        return pd.DataFrame(worksheet.get_all_records())
+        data = worksheet.get_all_records()
+        return pd.DataFrame(data) if data else pd.DataFrame()
 
     @retry_api_call()
-    def update_employee(self, employee_id, updated_data):
-        """Cập nhật nhân viên và xóa cache để dữ liệu mới được hiển thị"""
+    def add_movement_log(self, emp_id, emp_name, move_type, from_unit, to_unit, effective_date):
+        try:
+            ws = self.master_sh.worksheet("Movement_History")
+            ws.append_row([str(emp_id), emp_name, move_type, from_unit, to_unit, effective_date])
+            return True
+        except: return False
+
+    @retry_api_call()
+    def update_employee(self, employee_id, updated_data, move_log=None):
+        """Cập nhật hoặc Thêm mới nhân viên - Fix lỗi nhân bản"""
         try:
             worksheet = self.master_sh.worksheet("Employees")
-            df = pd.DataFrame(worksheet.get_all_records())
+            # Lấy toàn bộ cột ID để tìm kiếm chính xác dòng
+            ids = worksheet.col_values(1) # Cột A là Employee_ID
             
-            if employee_id in df['Employee_ID'].values:
-                cell = worksheet.find(str(employee_id))
-                row_idx = cell.row
-                new_row = [
-                    updated_data['Employee_ID'], updated_data['Full_Name'],
-                    updated_data['Unit_Name'], updated_data['Position_ID'],
-                    updated_data['Status'], updated_data['Join_Date']
-                ]
-                worksheet.update(f"A{row_idx}:F{row_idx}", [new_row])
+            new_row = [
+                str(updated_data['Employee_ID']), updated_data['Full_Name'],
+                updated_data['Unit_Name'], updated_data['Position_ID'],
+                updated_data['Status'], updated_data['Join_Date']
+            ]
+
+            target_row = -1
+            search_id = str(employee_id).strip()
+            
+            if search_id and search_id in ids:
+                target_row = ids.index(search_id) + 1
+                worksheet.update(f"A{target_row}:F{target_row}", [new_row])
             else:
-                new_row = [
-                    updated_data['Employee_ID'], updated_data['Full_Name'],
-                    updated_data['Unit_Name'], updated_data['Position_ID'],
-                    updated_data['Status'], updated_data['Join_Date']
-                ]
                 worksheet.append_row(new_row)
             
-            # Xóa cache để lần gọi tới sẽ tải dữ liệu mới
+            if move_log:
+                self.add_movement_log(
+                    employee_id, updated_data['Full_Name'],
+                    move_log['type'], move_log['from'], move_log['to'], move_log['date']
+                )
+            
             st.cache_data.clear()
             return True
         except Exception as e:
-            st.error(f"Lỗi cập nhật nhân sự: {e}")
-            return False
+            st.error(f"Lỗi cập nhật nhân sự: {e}"); return False
 
-    # --- NHÓM HÀM CHẤM CÔNG ---
     @retry_api_call()
     def get_available_years(self):
         try:
@@ -113,19 +118,20 @@ class Database:
     def get_attendance_data(self, year, month, unit_name):
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
-        worksheet = sh.worksheet("Attendance_Data")
-        df = pd.DataFrame(worksheet.get_all_records())
-        return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name)]
+        try:
+            worksheet = sh.worksheet("Attendance_Data")
+            data = worksheet.get_all_records()
+            df = pd.DataFrame(data)
+            if df.empty: return pd.DataFrame()
+            return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name)]
+        except: return pd.DataFrame()
 
     @retry_api_call()
     def save_attendance(self, df_to_save, year, month, unit_name):
         sh = self._open_att_file(year)
         if not sh: return False
         worksheet = sh.worksheet("Attendance_Data")
-        
-        # Đọc dữ liệu cũ để gộp
-        all_data_records = worksheet.get_all_records()
-        all_data = pd.DataFrame(all_data_records)
+        all_data = pd.DataFrame(worksheet.get_all_records())
         
         calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
         cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
@@ -133,7 +139,9 @@ class Database:
         df_to_save = df_to_save.reindex(columns=cols, fill_value="").replace([np.inf, -np.inf], np.nan).fillna("")
         
         if not all_data.empty:
-            others = all_data[~((all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name))]
+            # Chỉ xóa dữ liệu của tháng và đơn vị hiện tại để ghi đè
+            mask = (all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name)
+            others = all_data[~mask]
             final_df = pd.concat([others, df_to_save], ignore_index=True)
         else:
             final_df = df_to_save
