@@ -3,18 +3,23 @@ import pandas as pd
 from datetime import datetime
 from utils.processor import get_days_in_month, get_weekday_name, is_weekend
 from utils.pdf_generator import export_attendance_pdf
-from utils.excel_generator import export_attendance_excel # Import mới
+from utils.excel_generator import export_attendance_excel
 
 def get_working_window(emp_id, unit_name, month, year, history_df):
+    """Xác định những ngày nhân viên ĐƯỢC PHÉP làm việc tại đơn vị này"""
     start_day = 1
     end_day = 31
+    
     emp_id_str = str(emp_id).strip()
     unit_name_str = str(unit_name).strip()
+    
     if not emp_id_str or history_df.empty or 'Employee_ID' not in history_df.columns:
         return start_day, end_day
+        
     emp_history = history_df[history_df['Employee_ID'].astype(str).str.strip() == emp_id_str].copy()
     if emp_history.empty:
         return start_day, end_day
+
     for _, row in emp_history.iterrows():
         try:
             eff_date = datetime.strptime(str(row['Effective_Date']).strip(), "%d/%m/%Y")
@@ -28,13 +33,15 @@ def get_working_window(emp_id, unit_name, month, year, history_df):
     return start_day, end_day
 
 def calculate_summary_logic(df, active_days, is_direct_labor):
+    """Tính toán các chỉ tiêu tổng hợp công"""
     summary_rows = []
     df_reset = df.reset_index(drop=True)
     for _, row in df_reset.iterrows():
         res = {}
         actual_work_count = (row[active_days] == "+").sum()
         if not is_direct_labor:
-            res["Công sản phẩm"] = 0; res["Công thời gian"] = actual_work_count
+            res["Công sản phẩm"] = 0
+            res["Công thời gian"] = actual_work_count
             res["Ngừng việc 100%"] = (row[active_days].isin(["P", "L", "H"])).sum()
         else:
             res["Công sản phẩm"] = actual_work_count
@@ -70,6 +77,7 @@ def render_attendance_interface(db, user_info):
     num_days = get_days_in_month(year, month)
     active_days = [f"d{i}" for i in range(1, num_days + 1)]
 
+    # 4. Xác định danh sách nhân viên mục tiêu
     current_in_master = employees_df[employees_df['Unit_Name'].str.strip() == unit_name.strip()].copy()
     moved_ids = []
     if not history_df.empty and 'Employee_ID' in history_df.columns:
@@ -83,6 +91,7 @@ def render_attendance_interface(db, user_info):
     extra_from_history = employees_df[employees_df['Employee_ID'].astype(str).str.strip().isin(moved_ids)].copy()
     target_employees = pd.concat([current_in_master, extra_from_history]).drop_duplicates(subset=['Employee_ID'])
 
+    # 5. Lấy dữ liệu đã lưu
     existing_att = db.get_attendance_data(year, month, unit_name)
     status = existing_att['Status'].iloc[0] if not existing_att.empty else "Draft"
     
@@ -109,6 +118,7 @@ def render_attendance_interface(db, user_info):
         for i in range(1, 32): display_df[f"d{i}"] = ""
         display_df['Status'] = "Draft"
 
+    # 6. Gắn ký hiệu khóa
     for idx, row in display_df.iterrows():
         s, e = get_working_window(row['Employee_ID'], unit_name, month, year, history_df)
         for d in range(1, num_days + 1):
@@ -119,6 +129,7 @@ def render_attendance_interface(db, user_info):
             else:
                 if val == "🔒": display_df.at[idx, col] = ""
 
+    # Giao diện chính: Bảng chấm công
     column_config = {
         "Employee_ID": st.column_config.TextColumn("Mã NV", disabled=True),
         "Employee_Name": st.column_config.TextColumn("Họ tên", disabled=True),
@@ -128,12 +139,28 @@ def render_attendance_interface(db, user_info):
         column_config[f"d{i}"] = st.column_config.SelectboxColumn(label=f"{i:02d}", options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L", "🔒"], width="small", disabled=status in ["Submitted", "Approved"] or not is_owner)
 
     st.subheader(f"Bảng công {month}/{year}")
-    edited_df = st.data_editor(display_df[['Employee_ID', 'Employee_Name', 'Position_ID'] + active_days + ['Status']], column_config=column_config, hide_index=True, use_container_width=True, key=f"ed_{year}_{month}_{unit_name}_{len(display_df)}")
+    edited_df = st.data_editor(
+        display_df[['Employee_ID', 'Employee_Name', 'Position_ID'] + active_days + ['Status']], 
+        column_config=column_config, 
+        hide_index=True, 
+        use_container_width=True, 
+        key=f"ed_{year}_{month}_{unit_name}_{len(display_df)}"
+    )
 
+    # --- KHỐI PHỤC HỒI: BÁO CÁO TỔNG HỢP ---
+    unit_info = units_df[units_df['Unit_Name'].str.strip() == unit_name.strip()]
+    is_direct = str(unit_info.iloc[0]['Unit_ID']).startswith("ND") if not unit_info.empty else False
+    
+    # Tính toán lại chỉ tiêu dựa trên dữ liệu đang hiển thị (Realtime)
+    calc_df = calculate_summary_logic(edited_df, active_days, is_direct)
+    summary_display = pd.concat([edited_df.reset_index(drop=True)[['Employee_ID', 'Employee_Name']], calc_df], axis=1)
+    
+    st.subheader("📊 Báo cáo tổng hợp công")
+    st.dataframe(summary_display, hide_index=True, use_container_width=True)
+
+    # --- KHU VỰC THAO TÁC NÚT BẤM ---
     st.divider()
     c1, c2, c3, c4, c5 = st.columns([1, 1.2, 0.8, 1, 1])
-    # Tách cột PDF và Excel riêng
-    c6 = st.columns([1, 1.2, 0.8, 1, 1])[-1] 
     
     def handle_save(new_status):
         save_df = edited_df.copy().reset_index(drop=True)
@@ -143,8 +170,7 @@ def render_attendance_interface(db, user_info):
                 col = f"d{d}"
                 if d < s or d > e or save_df.at[idx, col] == "🔒": save_df.at[idx, col] = ""
         for d in range(num_days+1, 32): save_df[f"d{d}"] = ""
-        unit_info = units_df[units_df['Unit_Name'].str.strip() == unit_name.strip()]
-        is_direct = str(unit_info.iloc[0]['Unit_ID']).startswith("ND") if not unit_info.empty else False
+        
         summary = calculate_summary_logic(save_df, active_days, is_direct)
         for col in summary.columns: save_df[col] = summary[col]
         save_df['Year'], save_df['Month'], save_df['Unit_Name'], save_df['Status'] = year, month, unit_name, new_status
@@ -166,9 +192,8 @@ def render_attendance_interface(db, user_info):
             with c3:
                 if st.button("🔓 Mở sửa lại", use_container_width=True): handle_save("Draft")
 
-    # Xử lý xuất dữ liệu
-    sum_data = calculate_summary_logic(edited_df, active_days, False)
-    export_df = pd.concat([edited_df.reset_index(drop=True), sum_data], axis=1)
+    # Chuẩn bị dữ liệu cho việc xuất file (Bỏ ký hiệu khóa 🔒)
+    export_df = pd.concat([edited_df.reset_index(drop=True), calc_df], axis=1)
     
     with c4:
         pdf_bytes = export_attendance_pdf(export_df.copy().replace("🔒", ""), unit_name, month, year, status)
