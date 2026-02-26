@@ -57,41 +57,56 @@ class Database:
         return pd.DataFrame(data) if data else pd.DataFrame()
 
     @retry_api_call()
-    def add_movement_log(self, emp_id, emp_name, move_type, from_unit, to_unit, effective_date):
+    def update_user_password(self, username, new_password):
+        """Cập nhật mật khẩu cho người dùng trong tab Users"""
         try:
-            ws = self.master_sh.worksheet("Movement_History")
-            ws.append_row([str(emp_id), emp_name, move_type, from_unit, to_unit, effective_date])
-            return True
-        except: return False
+            worksheet = self.master_sh.worksheet("Users")
+            usernames = worksheet.col_values(1) # Cột A là Username
+            if username in usernames:
+                row_idx = usernames.index(username) + 1
+                # Cột B thường là Password
+                worksheet.update_cell(row_idx, 2, str(new_password))
+                st.cache_data.clear()
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Lỗi cập nhật mật khẩu: {e}")
+            return False
 
     @retry_api_call()
     def update_employee(self, employee_id, updated_data, move_log=None):
-        """Cập nhật hoặc Thêm mới nhân viên - Fix lỗi nhân bản"""
+        """Cập nhật/Thêm mới nhân viên - Fix lề ngày tháng và Dropdown"""
         try:
             worksheet = self.master_sh.worksheet("Employees")
-            # Lấy toàn bộ cột ID để tìm kiếm chính xác dòng
-            ids = worksheet.col_values(1) # Cột A là Employee_ID
+            ids = worksheet.col_values(1)
             
             new_row = [
-                str(updated_data['Employee_ID']), updated_data['Full_Name'],
-                updated_data['Unit_Name'], updated_data['Position_ID'],
-                updated_data['Status'], updated_data['Join_Date']
+                str(updated_data['Employee_ID']).strip(), 
+                str(updated_data['Full_Name']).strip(),
+                str(updated_data['Unit_Name']).strip(), 
+                str(updated_data['Position_ID']).strip(),
+                str(updated_data['Status']).strip(), 
+                str(updated_data['Join_Date']).strip()
             ]
 
-            target_row = -1
             search_id = str(employee_id).strip()
-            
+            # USER_ENTERED cực kỳ quan trọng để Sheets nhận diện ngày tháng và Dropdown
             if search_id and search_id in ids:
                 target_row = ids.index(search_id) + 1
-                worksheet.update(f"A{target_row}:F{target_row}", [new_row])
+                worksheet.update(f"A{target_row}:F{target_row}", [new_row], value_input_option='USER_ENTERED')
             else:
-                worksheet.append_row(new_row)
+                worksheet.append_row(new_row, value_input_option='USER_ENTERED')
             
             if move_log:
-                self.add_movement_log(
-                    employee_id, updated_data['Full_Name'],
-                    move_log['type'], move_log['from'], move_log['to'], move_log['date']
-                )
+                ws_log = self.master_sh.worksheet("Movement_History")
+                ws_log.append_row([
+                    str(employee_id).strip(), 
+                    str(updated_data['Full_Name']).strip(),
+                    move_log['type'], 
+                    str(move_log['from']).strip(), 
+                    str(move_log['to']).strip(), 
+                    str(move_log['date']).strip()
+                ], value_input_option='USER_ENTERED')
             
             st.cache_data.clear()
             return True
@@ -120,8 +135,7 @@ class Database:
         if not sh: return pd.DataFrame()
         try:
             worksheet = sh.worksheet("Attendance_Data")
-            data = worksheet.get_all_records()
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(worksheet.get_all_records())
             if df.empty: return pd.DataFrame()
             return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name)]
         except: return pd.DataFrame()
@@ -132,25 +146,20 @@ class Database:
         if not sh: return False
         worksheet = sh.worksheet("Attendance_Data")
         all_data = pd.DataFrame(worksheet.get_all_records())
-        
         calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
         cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
-        
         df_to_save = df_to_save.reindex(columns=cols, fill_value="").replace([np.inf, -np.inf], np.nan).fillna("")
-        
         if not all_data.empty:
-            # Chỉ xóa dữ liệu của tháng và đơn vị hiện tại để ghi đè
             mask = (all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name)
-            others = all_data[~mask]
-            final_df = pd.concat([others, df_to_save], ignore_index=True)
+            final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True)
         else:
             final_df = df_to_save
-
         final_df = final_df.replace([np.inf, -np.inf], np.nan).fillna("")
         worksheet.clear()
-        worksheet.update([final_df.columns.tolist()] + final_df.values.tolist())
+        worksheet.update([final_df.columns.tolist()] + final_df.values.tolist(), value_input_option='USER_ENTERED')
         return True
 
+# --- HÀM KHỞI TẠO (QUAN TRỌNG - KHÔNG ĐƯỢC THIẾU) ---
 def init_db():
     if 'db' not in st.session_state:
         st.session_state.db = Database('credentials.json', 'GasTime_Master_Data')
