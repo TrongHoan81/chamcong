@@ -7,27 +7,20 @@ from utils.excel_generator import export_attendance_excel
 
 def get_working_window(emp_id, unit_name, month, year, history_df):
     """Xác định những ngày nhân viên ĐƯỢC PHÉP làm việc tại đơn vị này"""
-    start_day = 1
-    end_day = 31
+    start_day, end_day = 1, 31
     emp_id_str = str(emp_id).strip()
     unit_name_str = str(unit_name).strip()
-    
     if not emp_id_str or history_df.empty or 'Employee_ID' not in history_df.columns:
         return start_day, end_day
-        
     emp_history = history_df[history_df['Employee_ID'].astype(str).str.strip() == emp_id_str].copy()
-    if emp_history.empty:
-        return start_day, end_day
-
+    if emp_history.empty: return start_day, end_day
     for _, row in emp_history.iterrows():
         try:
             eff_date = datetime.strptime(str(row['Effective_Date']).strip(), "%d/%m/%Y")
             if eff_date.month == month and eff_date.year == year:
                 day = eff_date.day
-                if str(row['To_Unit']).strip() == unit_name_str:
-                    start_day = max(start_day, day)
-                if str(row['From_Unit']).strip() == unit_name_str:
-                    end_day = min(end_day, day - 1)
+                if str(row['To_Unit']).strip() == unit_name_str: start_day = max(start_day, day)
+                if str(row['From_Unit']).strip() == unit_name_str: end_day = min(end_day, day - 1)
         except: continue
     return start_day, end_day
 
@@ -50,16 +43,11 @@ def calculate_summary_logic(df, active_days, is_direct_labor):
     return pd.DataFrame(summary_rows)
 
 def render_attendance_interface(db, user_info):
-    # --- NÚT LÀM MỚI DỮ LIỆU Ở SIDEBAR ---
-    with st.sidebar:
-        st.divider()
-        if st.button("🔄 Làm mới dữ liệu Master", use_container_width=True, help="Xóa bộ nhớ đệm và tải lại dữ liệu mới nhất từ Google Sheets"):
-            st.cache_data.clear()
-            st.success("Đã làm mới bộ nhớ đệm!")
-            st.rerun()
+    # ĐÃ LOẠI BỎ KHỐI st.sidebar TẠI ĐÂY ĐỂ TRÁNH LỖI TRÙNG LẶP ID VỚI APP.PY
 
     role = user_info['Role']
-    my_unit = user_info['Unit_Managed']
+    my_unit = str(user_info.get('Unit_Managed', '')).strip() 
+    
     st.header(f"Bảng chấm công")
     
     available_years = db.get_available_years()
@@ -78,11 +66,11 @@ def render_attendance_interface(db, user_info):
         unit_list = units_df['Unit_Name'].tolist()
         unit_name = st.selectbox("Chọn đơn vị", unit_list, index=unit_list.index(my_unit) if my_unit in unit_list else 0)
 
-    is_owner = (unit_name == my_unit) or (role == 'Admin')
+    # Logic is_owner chuẩn hóa để Manager không bị khóa bảng
+    is_owner = (str(unit_name).strip() == my_unit) or (role == 'Admin')
     num_days = get_days_in_month(year, month)
     active_days = [f"d{i}" for i in range(1, num_days + 1)]
 
-    # 4. Xác định danh sách nhân viên mục tiêu
     current_in_master = employees_df[employees_df['Unit_Name'].str.strip() == unit_name.strip()].copy()
     moved_ids = []
     if not history_df.empty and 'Employee_ID' in history_df.columns:
@@ -96,7 +84,6 @@ def render_attendance_interface(db, user_info):
     extra_from_history = employees_df[employees_df['Employee_ID'].astype(str).str.strip().isin(moved_ids)].copy()
     target_employees = pd.concat([current_in_master, extra_from_history]).drop_duplicates(subset=['Employee_ID'])
 
-    # 5. Lấy dữ liệu đã lưu
     existing_att = db.get_attendance_data(year, month, unit_name)
     status = existing_att['Status'].iloc[0] if not existing_att.empty else "Draft"
     
@@ -123,7 +110,6 @@ def render_attendance_interface(db, user_info):
         for i in range(1, 32): display_df[f"d{i}"] = ""
         display_df['Status'] = "Draft"
 
-    # 6. Gắn ký hiệu khóa
     for idx, row in display_df.iterrows():
         s, e = get_working_window(row['Employee_ID'], unit_name, month, year, history_df)
         for d in range(1, num_days + 1):
@@ -134,40 +120,22 @@ def render_attendance_interface(db, user_info):
             else:
                 if val == "🔒": display_df.at[idx, col] = ""
 
-    # --- ĐỊNH CẤU HÌNH CỘT VỚI THỨ VÀ CHẤM ĐỎ ---
     column_config = {
         "Employee_ID": st.column_config.TextColumn("Mã NV", disabled=True),
         "Employee_Name": st.column_config.TextColumn("Họ tên", disabled=True),
         "Position_ID": st.column_config.TextColumn("Chức danh", disabled=True),
     }
-    
     for i in range(1, num_days + 1):
-        # Lấy tên Thứ (T2, T3... CN)
-        wd_name = get_weekday_name(year, month, i)
-        is_we = is_weekend(year, month, i)
-        
-        # Tạo label trực quan: "01/T2" hoặc "07/T7 🔴"
-        col_label = f"{i:02d}/{wd_name}"
-        if is_we:
-            col_label += " 🔴"
-            
-        column_config[f"d{i}"] = st.column_config.SelectboxColumn(
-            label=col_label, 
-            options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L", "🔒"], 
-            width="small", 
-            disabled=status in ["Submitted", "Approved"] or not is_owner
-        )
+        wd = get_weekday_name(year, month, i)
+        label = f"{i:02d}/{wd}" + (" 🔴" if is_weekend(year, month, i) else "")
+        column_config[f"d{i}"] = st.column_config.SelectboxColumn(label=label, options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L", "🔒"], width="small", disabled=status in ["Submitted", "Approved"] or not is_owner)
 
     st.subheader(f"Bảng công {month}/{year}")
-    edited_df = st.data_editor(
-        display_df[['Employee_ID', 'Employee_Name', 'Position_ID'] + active_days + ['Status']], 
-        column_config=column_config, 
-        hide_index=True, 
-        use_container_width=True, 
-        key=f"ed_{year}_{month}_{unit_name}_{len(display_df)}"
-    )
+    edited_df = st.data_editor(display_df[['Employee_ID', 'Employee_Name', 'Position_ID'] + active_days + ['Status']], column_config=column_config, hide_index=True, use_container_width=True, key=f"ed_{year}_{month}_{unit_name}_{len(display_df)}")
 
-    # Báo cáo tổng hợp
+    # KHÔI PHỤC: HƯỚNG DẪN KÝ HIỆU CHẤM CÔNG (ĐÃ FIX LỖI 2)
+    st.info("**Ký hiệu chấm công:** (+) Đi làm hưởng lương SP/TG; (P) Phép; (L) Lễ; (H) Hội nghị/Học tập; (Ô) Ôm; (Cô) Con ôm; (TS) Thai sản; (T) Dưỡng sức; (N) Ngừng việc; (NB) Nghỉ bù; (KL) Không lương; (🔒) Ngày không thuộc đơn vị.")
+
     unit_info = units_df[units_df['Unit_Name'].str.strip() == unit_name.strip()]
     is_direct = str(unit_info.iloc[0]['Unit_ID']).startswith("ND") if not unit_info.empty else False
     calc_df = calculate_summary_logic(edited_df, active_days, is_direct)
@@ -176,7 +144,6 @@ def render_attendance_interface(db, user_info):
     st.subheader("📊 Báo cáo tổng hợp công")
     st.dataframe(summary_display, hide_index=True, use_container_width=True)
 
-    # Khu vực nút bấm
     st.divider()
     c1, c2, c3, c4, c5 = st.columns([1, 1.2, 0.8, 1, 1])
     
