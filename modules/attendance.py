@@ -9,7 +9,6 @@ def get_working_window(emp_id, unit_name, month, year, history_df):
     """Xác định những ngày nhân viên ĐƯỢC PHÉP làm việc tại đơn vị này"""
     start_day = 1
     end_day = 31
-    
     emp_id_str = str(emp_id).strip()
     unit_name_str = str(unit_name).strip()
     
@@ -33,15 +32,13 @@ def get_working_window(emp_id, unit_name, month, year, history_df):
     return start_day, end_day
 
 def calculate_summary_logic(df, active_days, is_direct_labor):
-    """Tính toán các chỉ tiêu tổng hợp công"""
     summary_rows = []
     df_reset = df.reset_index(drop=True)
     for _, row in df_reset.iterrows():
         res = {}
         actual_work_count = (row[active_days] == "+").sum()
         if not is_direct_labor:
-            res["Công sản phẩm"] = 0
-            res["Công thời gian"] = actual_work_count
+            res["Công sản phẩm"] = 0; res["Công thời gian"] = actual_work_count
             res["Ngừng việc 100%"] = (row[active_days].isin(["P", "L", "H"])).sum()
         else:
             res["Công sản phẩm"] = actual_work_count
@@ -53,6 +50,14 @@ def calculate_summary_logic(df, active_days, is_direct_labor):
     return pd.DataFrame(summary_rows)
 
 def render_attendance_interface(db, user_info):
+    # --- NÚT LÀM MỚI DỮ LIỆU Ở SIDEBAR ---
+    with st.sidebar:
+        st.divider()
+        if st.button("🔄 Làm mới dữ liệu Master", use_container_width=True, help="Xóa bộ nhớ đệm và tải lại dữ liệu mới nhất từ Google Sheets"):
+            st.cache_data.clear()
+            st.success("Đã làm mới bộ nhớ đệm!")
+            st.rerun()
+
     role = user_info['Role']
     my_unit = user_info['Unit_Managed']
     st.header(f"Bảng chấm công")
@@ -129,14 +134,29 @@ def render_attendance_interface(db, user_info):
             else:
                 if val == "🔒": display_df.at[idx, col] = ""
 
-    # Giao diện chính: Bảng chấm công
+    # --- ĐỊNH CẤU HÌNH CỘT VỚI THỨ VÀ CHẤM ĐỎ ---
     column_config = {
         "Employee_ID": st.column_config.TextColumn("Mã NV", disabled=True),
         "Employee_Name": st.column_config.TextColumn("Họ tên", disabled=True),
         "Position_ID": st.column_config.TextColumn("Chức danh", disabled=True),
     }
+    
     for i in range(1, num_days + 1):
-        column_config[f"d{i}"] = st.column_config.SelectboxColumn(label=f"{i:02d}", options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L", "🔒"], width="small", disabled=status in ["Submitted", "Approved"] or not is_owner)
+        # Lấy tên Thứ (T2, T3... CN)
+        wd_name = get_weekday_name(year, month, i)
+        is_we = is_weekend(year, month, i)
+        
+        # Tạo label trực quan: "01/T2" hoặc "07/T7 🔴"
+        col_label = f"{i:02d}/{wd_name}"
+        if is_we:
+            col_label += " 🔴"
+            
+        column_config[f"d{i}"] = st.column_config.SelectboxColumn(
+            label=col_label, 
+            options=["", "+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L", "🔒"], 
+            width="small", 
+            disabled=status in ["Submitted", "Approved"] or not is_owner
+        )
 
     st.subheader(f"Bảng công {month}/{year}")
     edited_df = st.data_editor(
@@ -147,18 +167,16 @@ def render_attendance_interface(db, user_info):
         key=f"ed_{year}_{month}_{unit_name}_{len(display_df)}"
     )
 
-    # --- KHỐI PHỤC HỒI: BÁO CÁO TỔNG HỢP ---
+    # Báo cáo tổng hợp
     unit_info = units_df[units_df['Unit_Name'].str.strip() == unit_name.strip()]
     is_direct = str(unit_info.iloc[0]['Unit_ID']).startswith("ND") if not unit_info.empty else False
-    
-    # Tính toán lại chỉ tiêu dựa trên dữ liệu đang hiển thị (Realtime)
     calc_df = calculate_summary_logic(edited_df, active_days, is_direct)
     summary_display = pd.concat([edited_df.reset_index(drop=True)[['Employee_ID', 'Employee_Name']], calc_df], axis=1)
     
     st.subheader("📊 Báo cáo tổng hợp công")
     st.dataframe(summary_display, hide_index=True, use_container_width=True)
 
-    # --- KHU VỰC THAO TÁC NÚT BẤM ---
+    # Khu vực nút bấm
     st.divider()
     c1, c2, c3, c4, c5 = st.columns([1, 1.2, 0.8, 1, 1])
     
@@ -170,7 +188,6 @@ def render_attendance_interface(db, user_info):
                 col = f"d{d}"
                 if d < s or d > e or save_df.at[idx, col] == "🔒": save_df.at[idx, col] = ""
         for d in range(num_days+1, 32): save_df[f"d{d}"] = ""
-        
         summary = calculate_summary_logic(save_df, active_days, is_direct)
         for col in summary.columns: save_df[col] = summary[col]
         save_df['Year'], save_df['Month'], save_df['Unit_Name'], save_df['Status'] = year, month, unit_name, new_status
@@ -192,13 +209,10 @@ def render_attendance_interface(db, user_info):
             with c3:
                 if st.button("🔓 Mở sửa lại", use_container_width=True): handle_save("Draft")
 
-    # Chuẩn bị dữ liệu cho việc xuất file (Bỏ ký hiệu khóa 🔒)
     export_df = pd.concat([edited_df.reset_index(drop=True), calc_df], axis=1)
-    
     with c4:
         pdf_bytes = export_attendance_pdf(export_df.copy().replace("🔒", ""), unit_name, month, year, status)
         st.download_button("📄 PDF", pdf_bytes, f"BCC_{unit_name}_{month}_{year}.pdf", "application/pdf", use_container_width=True)
-    
     with c5:
         excel_bytes = export_attendance_excel(export_df.copy().replace("🔒", ""), unit_name, month, year, status)
         st.download_button("Excel", excel_bytes, f"BCC_{unit_name}_{month}_{year}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
