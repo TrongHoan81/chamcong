@@ -8,13 +8,13 @@ from modules.hr import render_hr_interface
 
 # 1. Cấu hình trang (Sử dụng Logo1 cho favicon trình duyệt)
 st.set_page_config(
-    page_title="GasTime Pro - PVOIL Nam Định", 
+    page_title="PVOIL iTPH - PVOIL Nam Định", 
     page_icon="assets/Logo1.png" if os.path.exists("assets/Logo1.png") else "⛽", 
     layout="wide"
 )
 
 def get_base64_of_bin_file(bin_file):
-    """Mã hóa ảnh sang base64 để nhúng trực tiếp vào HTML (Tránh lỗi hiển thị)"""
+    """Mã hóa ảnh sang base64 để nhúng trực tiếp vào HTML (Tránh lỗi hiển thị cache)"""
     try:
         if os.path.exists(bin_file):
             with open(bin_file, 'rb') as f:
@@ -24,7 +24,7 @@ def get_base64_of_bin_file(bin_file):
     except Exception:
         return None
 
-# 2. KHÔI PHỤC TOÀN BỘ CSS GỐC (Phong cách PVOIL chuẩn)
+# 2. CSS Phong cách PVOIL chuẩn - Tên công ty 54px
 st.markdown("""
 <style>
 :root {
@@ -34,7 +34,6 @@ st.markdown("""
     --slate-100: #f1f5f9;
 }
 
-/* Container chính bao phủ toàn bộ Header */
 .header-master-container {
     background-color: white;
     padding: 10px 0 30px 0;
@@ -63,7 +62,6 @@ st.markdown("""
     text-align: center;
 }
 
-/* Tên công ty 54px màu đỏ PVOIL */
 .company-name-line {
     color: var(--pvoil-red);
     font-size: 54px;
@@ -81,7 +79,6 @@ st.markdown("""
     font-weight: 400;
 }
 
-/* Đường kẻ phân cách màu xanh */
 .separator-line {
     height: 6px;
     width: 150px;
@@ -90,7 +87,6 @@ st.markdown("""
     margin: 20px 0;
 }
 
-/* Tiêu đề ứng dụng màu xanh/đen lớn */
 .main-app-title {
     color: var(--slate-800);
     font-size: 32px;
@@ -116,25 +112,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 3. Khởi tạo Database
+# 3. Khởi tạo Database & Auth
 db = init_db()
 
-# Quản lý trạng thái phiên làm việc
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'page' not in st.session_state:
     st.session_state.page = "main"
 
-# 4. Điều hướng và Hiển thị
+# 4. Điều hướng
 if not st.session_state.authenticated:
     render_login(db)
 else:
     user = st.session_state.user
     role = user.get('Role', 'Guest')
     
-    # --- SIDEBAR (THANH BÊN) ---
     with st.sidebar:
-        # Sử dụng Logo1.png cho Sidebar
         logo_sidebar_path = "assets/Logo1.png"
         if os.path.exists(logo_sidebar_path):
             st.image(logo_sidebar_path, use_container_width=True)
@@ -142,13 +135,13 @@ else:
             st.markdown("<h2 style='text-align: center; color: #ed1c24;'>PVOIL</h2>", unsafe_allow_html=True)
             
         st.divider()
+        st.title("PVOIL iTPH")
         st.markdown(f"👤 **{user['Full_Name']}**")
         st.caption(f"Vai trò: {role}")
         st.caption(f"Đơn vị: {user.get('Unit_Managed', 'N/A')}")
         
         st.divider()
         
-        # Nút tính năng
         if st.button("🔄 Làm mới dữ liệu Master", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -163,12 +156,11 @@ else:
             st.session_state.page = "main"
             st.rerun()
 
-    # --- KHÔI PHỤC HEADER CHÍNH (GIỐNG HỆT BẢN CŨ) ---
+    # --- HEADER CHÍNH ---
     logo_header_path = "assets/Logo2.png"
     img_base64 = get_base64_of_bin_file(logo_header_path)
     
     if img_base64:
-        # Tái hiện cấu trúc HTML đa tầng
         html_header = f"""
 <div class="header-master-container">
     <div class="header-top-row">
@@ -183,32 +175,25 @@ else:
     </div>
     <div class="separator-line"></div>
     <div class="main-app-title">
-        ỨNG DỤNG CHẤM CÔNG, TÍNH LƯƠNG VÀ QUẢN LÝ NHÂN SỰ
+        PVOIL iTPH: CHẤM CÔNG, TÍNH LƯƠNG & QUẢN LÝ NHÂN SỰ
     </div>
 </div>
 """
         st.markdown(html_header, unsafe_allow_html=True)
-    else:
-        st.error(f"⚠️ Cảnh báo: Không tìm thấy tài nguyên hình ảnh tại '{logo_header_path}'. Vui lòng kiểm tra thư mục assets.")
 
-    # --- ĐIỀU HƯỚNG NỘI DUNG NGHIỆP VỤ ---
+    # --- ĐIỀU HƯỚNG NỘI DUNG ---
     if st.session_state.page == "change_password":
         render_change_password_form(db, user)
     else:
-        # Hiển thị các Tab chức năng dựa trên quyền hạn
         if role in ['Admin', 'Salary_Admin', 'HR_Director', 'HR_Admin']:
             tab1, tab2 = st.tabs(["📅 Bảng Chấm Công", "👥 Quản Lý Nhân Sự"])
-            with tab1:
-                render_attendance_interface(db, user)
-            with tab2:
-                render_hr_interface(db)
+            with tab1: render_attendance_interface(db, user)
+            with tab2: render_hr_interface(db)
         else:
-            # Manager chỉ thấy tab Chấm công
             render_attendance_interface(db, user)
 
-    # --- FOOTER BẢN QUYỀN ---
     st.markdown(f"""
     <div class="footer-credit">
-        © 2026 GasTime Pro - Phát triển bởi <b>Nguyễn Trọng Hoàn</b> - 📞 0902069469
+        © 2026 PVOIL iTPH - Phát triển bởi <b>Nguyễn Trọng Hoàn</b> - 📞 0902069469
     </div>
     """, unsafe_allow_html=True)
