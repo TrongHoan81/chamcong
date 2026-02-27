@@ -71,12 +71,9 @@ class Database:
             st.error(f"Lỗi cập nhật mật khẩu: {e}"); return False
 
     def _clean_for_sheets(self, val):
-        """Hàm quan trọng: Ngăn chặn lỗi công thức #ERROR! trên Sheets"""
         s = str(val).strip()
         if s in ['nan', 'None', 'NaN', '🔒']: return ""
-        # Nếu bắt đầu bằng dấu +, -, = thì thêm dấu nháy đơn để Sheets hiểu là Văn bản
-        if s.startswith(('+', '-', '=')):
-            return "'" + s
+        if s.startswith(('+', '-', '=')): return "'" + s
         return s
 
     @retry_api_call()
@@ -84,7 +81,6 @@ class Database:
         try:
             worksheet = self.master_sh.worksheet("Employees")
             ids = worksheet.col_values(1)
-            
             new_row = [
                 self._clean_for_sheets(updated_data['Employee_ID']), 
                 self._clean_for_sheets(updated_data['Full_Name']),
@@ -93,29 +89,31 @@ class Database:
                 self._clean_for_sheets(updated_data['Status']), 
                 self._clean_for_sheets(updated_data['Join_Date'])
             ]
-
             search_id = str(employee_id).strip()
             if search_id and search_id in ids:
                 target_row = ids.index(search_id) + 1
                 worksheet.update(f"A{target_row}:F{target_row}", [new_row], value_input_option='USER_ENTERED')
             else:
                 worksheet.append_row(new_row, value_input_option='USER_ENTERED')
-            
             if move_log:
                 ws_log = self.master_sh.worksheet("Movement_History")
                 ws_log.append_row([
-                    self._clean_for_sheets(employee_id), 
-                    self._clean_for_sheets(updated_data['Full_Name']),
-                    self._clean_for_sheets(move_log['type']), 
-                    self._clean_for_sheets(move_log['from']), 
-                    self._clean_for_sheets(move_log['to']), 
-                    self._clean_for_sheets(move_log['date'])
+                    self._clean_for_sheets(employee_id), self._clean_for_sheets(updated_data['Full_Name']),
+                    self._clean_for_sheets(move_log['type']), self._clean_for_sheets(move_log['from']), 
+                    self._clean_for_sheets(move_log['to']), self._clean_for_sheets(move_log['date'])
                 ], value_input_option='USER_ENTERED')
-            
             st.cache_data.clear()
             return True
         except Exception as e:
             st.error(f"Lỗi cập nhật nhân sự: {e}"); return False
+
+    @retry_api_call()
+    def get_available_years(self):
+        try:
+            all_sh = self.client.openall()
+            years = [int(s.title.split("_")[-1]) for s in all_sh if s.title.startswith("GasTime_Attendance_")]
+            return sorted(list(set(years)), reverse=True) if years else [datetime.now().year]
+        except: return [datetime.now().year]
 
     def _open_att_file(self, year):
         if self.loaded_year == str(year) and self.att_sh: return self.att_sh
@@ -126,47 +124,40 @@ class Database:
         except: return None
 
     @retry_api_call()
-    def get_available_years(self):
-        try:
-            all_sh = self.client.openall()
-            years = [int(s.title.split("_")[-1]) for s in all_sh if s.title.startswith("GasTime_Attendance_")]
-            return sorted(list(set(years)), reverse=True) if years else [datetime.now().year]
-        except: return [datetime.now().year]
-
-    @retry_api_call()
-    def get_attendance_data(self, year, month, unit_name):
+    def get_attendance_data(self, year, month, unit_name, shift_type="Normal"):
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
         try:
             worksheet = sh.worksheet("Attendance_Data")
             df = pd.DataFrame(worksheet.get_all_records())
-            return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name)]
+            if 'Shift_Type' not in df.columns: df['Shift_Type'] = "Normal"
+            return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name) & (df['Shift_Type'] == shift_type)]
         except: return pd.DataFrame()
 
     @retry_api_call()
-    def save_attendance(self, df_to_save, year, month, unit_name):
+    def save_attendance(self, df_to_save, year, month, unit_name, shift_type="Normal"):
         sh = self._open_att_file(year)
         if not sh: return False
         worksheet = sh.worksheet("Attendance_Data")
         all_data = pd.DataFrame(worksheet.get_all_records())
+        if 'Shift_Type' not in all_data.columns: all_data['Shift_Type'] = "Normal"
         
         calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
-        cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
+        cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name', 'Shift_Type'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
         
+        df_to_save['Shift_Type'] = shift_type
         df_to_save = df_to_save.reindex(columns=cols, fill_value="")
         
         if not all_data.empty:
-            mask = (all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name)
+            mask = (all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name) & (all_data['Shift_Type'] == shift_type)
             final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True)
         else:
             final_df = df_to_save
-
-        # LÀM SẠCH DỮ LIỆU VÀ TRÁNH LỖI CÔNG THỨC CHO TOÀN BỘ BẢNG
+            
         final_list = [final_df.columns.tolist()]
         for row in final_df.values.tolist():
-            cleaned_row = [self._clean_for_sheets(val) for val in row]
-            final_list.append(cleaned_row)
-        
+            final_list.append([self._clean_for_sheets(val) for val in row])
+            
         worksheet.clear()
         worksheet.update(final_list, value_input_option='USER_ENTERED')
         return True
