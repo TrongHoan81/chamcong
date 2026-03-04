@@ -6,21 +6,48 @@ from utils.pdf_generator import export_attendance_pdf
 from utils.excel_generator import export_attendance_excel
 
 def get_working_window(emp_id, unit_name, month, year, history_df):
-    """Xác định những ngày nhân viên ĐƯỢC PHÉP làm việc tại đơn vị này"""
-    start_day, end_day = 1, 31
-    emp_id_str, unit_name_str = str(emp_id).strip(), str(unit_name).strip()
-    if not emp_id_str or history_df.empty: return start_day, end_day
-    emp_history = history_df[history_df['Employee_ID'].astype(str).str.strip() == emp_id_str].copy()
-    if emp_history.empty: return start_day, end_day
-    for _, row in emp_history.iterrows():
-        try:
-            eff_date = datetime.strptime(str(row['Effective_Date']).strip(), "%d/%m/%Y")
-            if eff_date.month == month and eff_date.year == year:
-                day = eff_date.day
-                if str(row['To_Unit']).strip() == unit_name_str: start_day = max(start_day, day)
-                if str(row['From_Unit']).strip() == unit_name_str: end_day = min(end_day, day - 1)
-        except: continue
-    return start_day, end_day
+    """
+    Xác định DANH SÁCH các ngày nhân viên có mặt tại đơn vị trong tháng.
+    Hỗ trợ cơ chế 'Đi rồi về' (Điều động tạm thời).
+    """
+    days_in_unit = set()
+    num_days = get_days_in_month(year, month)
+    emp_id_str = str(emp_id).strip()
+    unit_name_str = str(unit_name).strip()
+    
+    if history_df.empty or 'Employee_ID' not in history_df.columns:
+        return set(range(1, num_days + 1)) # Mặc định cho phép tất cả nếu không có lịch sử
+
+    # Lấy lịch sử của nhân viên này, sắp xếp theo ngày hiệu lực
+    h_df = history_df[history_df['Employee_ID'].astype(str).str.strip() == emp_id_str].copy()
+    h_df['dt'] = pd.to_datetime(h_df['Effective_Date'], format='%d/%m/%Y', errors='coerce')
+    h_df = h_df.dropna(subset=['dt']).sort_values('dt')
+
+    # 1. Xác định trạng thái đơn vị của nhân viên tại ngày đầu tháng (01/month/year)
+    start_of_month = datetime(year, month, 1)
+    current_unit = ""
+    
+    # Tìm bản ghi lịch sử cuối cùng trước ngày đầu tháng
+    history_before = h_df[h_df['dt'] <= start_of_month]
+    if not history_before.empty:
+        last_rec = history_before.iloc[-1]
+        current_unit = str(last_rec['To_Unit']).strip() if last_rec['Type'] != 'Nghỉ việc' else "TERMINATED"
+    
+    # 2. Duyệt qua từng ngày trong tháng để kiểm tra đơn vị
+    for d in range(1, num_days + 1):
+        curr_date = datetime(year, month, d)
+        
+        # Kiểm tra xem ngày hôm nay có bản ghi biến động nào không
+        today_events = h_df[h_df['dt'] == curr_date]
+        if not today_events.empty:
+            # Lấy biến động cuối cùng trong ngày (phòng trường hợp điều động 2 lần/ngày)
+            last_event = today_events.iloc[-1]
+            current_unit = str(last_event['To_Unit']).strip() if last_event['Type'] != 'Nghỉ việc' else "TERMINATED"
+            
+        if current_unit == unit_name_str:
+            days_in_unit.add(d)
+            
+    return days_in_unit
 
 def calculate_summary_logic(df, active_days, is_direct_labor):
     summary_rows = []
@@ -42,7 +69,6 @@ def calculate_summary_logic(df, active_days, is_direct_labor):
 def render_attendance_interface(db, user_info, forced_unit=None):
     role = user_info['Role']
     my_unit = str(user_info.get('Unit_Managed', '')).strip()
-    
     st.header(f"Bảng chấm công")
     
     available_years = db.get_available_years()
@@ -60,7 +86,6 @@ def render_attendance_interface(db, user_info, forced_unit=None):
     shift_options = ["Normal"]
     if curr_unit_id in ["VP_KTC", "VP_TCHC"]: shift_options.append("Shift 3")
     if curr_unit_id.startswith("ND") or curr_unit_id == "VP_KTC" or curr_unit_id == "VP_KDXD": shift_options.append("Hazardous")
-    
     shift_type = "Normal"
     if len(shift_options) > 1:
         with c_s: shift_type = st.selectbox("Loại bảng công", shift_options, format_func=lambda x: "Ca hành chính/SP" if x == "Normal" else ("Công ca 3" if x == "Shift 3" else "Công độc hại"))
@@ -72,32 +97,20 @@ def render_attendance_interface(db, user_info, forced_unit=None):
     current_in_master['Ghi chú'] = ""
     assigned_kn = concurrent_df[concurrent_df['Unit_Name_KN'].str.strip() == unit_name.strip()].copy()
     
-    if shift_type == "Shift 3" and curr_unit_id == "VP_TCHC":
-        current_in_master = current_in_master[current_in_master['Position_ID'].astype(str).str.strip() == "BV"]
-        assigned_kn = assigned_kn[assigned_kn['Position_KN'].astype(str).str.strip() == "BV"]
-    
     kn_data = []
     for _, row in assigned_kn.iterrows():
         orig = employees_df[employees_df['Employee_ID'].astype(str).str.strip() == str(row['Employee_ID']).strip()]
         if not orig.empty:
             kn_row = orig.iloc[0].copy(); kn_row['Position_ID'] = row['Position_KN']; kn_row['Ghi chú'] = "KN"; kn_data.append(kn_row)
-    
     target_employees = pd.concat([current_in_master, pd.DataFrame(kn_data)]).drop_duplicates(subset=['Employee_ID'])
-
-    if shift_type == "Hazardous":
-        target_employees = target_employees[target_employees['Ghi chú'] != "KN"]
-        if curr_unit_id == "VP_KDXD": target_employees = target_employees[target_employees['Position_ID'].astype(str).str.strip() == "LX"]
 
     existing_att = db.get_attendance_data(year, month, unit_name, "Normal" if shift_type == "Hazardous" else shift_type)
     status = existing_att['Status'].iloc[0] if not existing_att.empty else "Draft"
     
     if not existing_att.empty:
         display_df = existing_att.copy()
-        # FIX: Bóc tách dấu nháy đơn để dấu + hiển thị đúng trên UI
         for d in active_days:
-            if d in display_df.columns:
-                display_df[d] = display_df[d].astype(str).str.lstrip("'")
-        
+            if d in display_df.columns: display_df[d] = display_df[d].astype(str).str.lstrip("'")
         if 'Position_ID' not in display_df.columns: display_df['Position_ID'] = ""
         if 'Ghi chú' not in display_df.columns: display_df['Ghi chú'] = ""
         saved_ids = display_df['Employee_ID'].astype(str).str.strip().tolist()
@@ -115,11 +128,13 @@ def render_attendance_interface(db, user_info, forced_unit=None):
     display_df['Ghi chú'] = display_df['Employee_ID'].map(kn_map).fillna(display_df.get('Ghi chú', ""))
     display_df['Position_ID'] = display_df['Employee_ID'].map(pos_map).fillna(display_df.get('Position_ID', ""))
 
+    # LOGIC KHÓA CÔNG 🔒 (Đã nâng cấp cho điều động tạm thời)
     for idx, row in display_df.iterrows():
-        s, e = get_working_window(row['Employee_ID'], unit_name, month, year, history_df)
+        valid_days = get_working_window(row['Employee_ID'], unit_name, month, year, history_df)
         for d in range(1, num_days + 1):
             col = f"d{d}"; val = str(display_df.at[idx, col]).strip()
-            if d < s or d > e: 
+            if d not in valid_days: 
+                # Nếu ngày đó không thuộc đơn vị này, ép khóa 🔒 trừ khi là ký hiệu cũ hợp lệ
                 if val not in ["+", "Ô", "Cô", "TS", "T", "P", "H", "NB", "KL", "N", "L"]: display_df.at[idx, col] = "🔒"
             elif val == "🔒": display_df.at[idx, col] = ""
 
@@ -140,9 +155,6 @@ def render_attendance_interface(db, user_info, forced_unit=None):
     st.subheader(f"Bảng công {month}/{year}" if shift_type == "Normal" else (f"Bảng công độc hại - {month}/{year}" if is_haz else f"Bảng công ca 3 - {month}/{year}"))
     edited_df = st.data_editor(display_df[col_order], column_config=config, hide_index=True, use_container_width=True, key=f"ed_{year}_{month}_{unit_name}_{shift_type}")
 
-    if shift_type == "Shift 3": st.info("**Ký hiệu ca 3:** (+) Làm ca 3; (🔒) Ngày không thuộc đơn vị. Để trống nếu nghỉ.")
-    else: st.info("**Ký hiệu:** (+) Đi làm; (P) Phép; (L) Lễ; (H) Học tập; (Ô) Ôm; (Cô) Con ôm; (TS) Thai sản; (T) Tai nạn; (N) Ngừng việc; (NB) Nghỉ bù; (KL) Không lương; (🔒) Khóa.")
-
     is_dir = curr_unit_id.startswith("ND"); calc = calculate_summary_logic(edited_df, active_days, is_dir)
     st.subheader("📊 Tổng hợp công"); sum_disp = pd.concat([edited_df.reset_index(drop=True)[['Employee_ID', 'Employee_Name']], calc], axis=1)
     if shift_type in ["Shift 3", "Hazardous"]: sum_disp = sum_disp[sum_disp.iloc[:, 2:].sum(axis=1) > 0]
@@ -150,17 +162,11 @@ def render_attendance_interface(db, user_info, forced_unit=None):
 
     st.divider(); c1, c2, c3, c4, c5 = st.columns([1, 1.2, 0.8, 1, 1])
 
-    # FIX: Tính toán lại công tổng hợp và gán vào DataFrame trước khi gửi đi lưu
     def execute_save(new_status):
         save_df = edited_df.copy().reset_index(drop=True)
-        # Tính toán dữ liệu "Quy ra công" để lưu vào Sheets
-        is_dir_labor = curr_unit_id.startswith("ND")
-        summary_df = calculate_summary_logic(save_df, active_days, is_dir_labor)
-        
-        # Gộp dữ liệu ngày và dữ liệu tổng hợp
+        summary_df = calculate_summary_logic(save_df, active_days, curr_unit_id.startswith("ND"))
         save_df = pd.concat([save_df, summary_df], axis=1)
         save_df['Status'] = new_status
-        
         final_shift = "Hazardous" if shift_type == "Hazardous" else shift_type
         if db.save_attendance(save_df, year, month, unit_name, final_shift):
             st.cache_data.clear(); return True
@@ -190,4 +196,3 @@ def render_attendance_interface(db, user_info, forced_unit=None):
     exp = pd.concat([edited_df.reset_index(drop=True), calc], axis=1)
     with c4: st.download_button("📄 PDF", export_attendance_pdf(exp.copy().replace("🔒", ""), unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{shift_type}_{month}_{year}.pdf", "application/pdf", use_container_width=True)
     with c5: st.download_button("Excel", export_attendance_excel(exp.copy().replace("🔒", ""), unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{shift_type}_{month}_{year}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    
