@@ -7,7 +7,7 @@ from modules.attendance import render_attendance_interface
 from modules.hr import render_hr_interface
 from modules.dashboard import render_dashboard
 
-# 1. Cấu hình trang
+# Cấu hình trang nòng cốt
 st.set_page_config(
     page_title="PVOIL iTPH - PVOIL Nam Định", 
     page_icon="assets/Logo1.png" if os.path.exists("assets/Logo1.png") else "⛽", 
@@ -21,10 +21,9 @@ def get_base64_of_bin_file(bin_file):
                 data = f.read()
             return base64.b64encode(data).decode()
         return None
-    except Exception:
-        return None
+    except Exception: return None
 
-# 2. CSS PVOIL - Đóng băng giao diện
+# Giao diện đóng băng PVOIL Standard
 st.markdown("""
 <style>
 :root { --pvoil-red: #ed1c24; --pvoil-blue: #00529b; --slate-800: #1e293b; --slate-100: #f1f5f9; }
@@ -41,10 +40,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 db = init_db()
-
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 if 'page' not in st.session_state: st.session_state.page = "main"
-if 'selected_unit_dash' not in st.session_state: st.session_state.selected_unit_dash = None
 
 if not st.session_state.authenticated:
     render_login(db)
@@ -53,33 +50,25 @@ else:
     role = user.get('Role', 'Guest')
     
     with st.sidebar:
-        logo_sidebar_path = "assets/Logo1.png"
-        if os.path.exists(logo_sidebar_path): st.image(logo_sidebar_path, use_container_width=True)
+        logo_sidebar = "assets/Logo1.png"
+        if os.path.exists(logo_sidebar): st.image(logo_sidebar, use_container_width=True)
         st.divider()
-        st.title("PVOIL iTPH")
+        st.title("PVOIL iTPH v1.7")
         st.markdown(f"👤 **{user['Full_Name']}**")
         st.caption(f"Vai trò: {role}")
         st.caption(f"Đơn vị: {user.get('Unit_Managed', 'N/A')}")
         st.divider()
-        if st.button("🔄 Làm mới dữ liệu Master", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("🔑 Đổi mật khẩu", use_container_width=True):
-            st.session_state.page = "change_password"
-            st.rerun()
-        if st.button("🚪 Đăng xuất", use_container_width=True):
-            st.session_state.authenticated = False
-            st.session_state.user = None
-            st.session_state.page = "main"
-            st.rerun()
+        if st.button("🔄 Làm mới Master", use_container_width=True): st.cache_data.clear(); st.rerun()
+        if st.button("🔑 Đổi mật khẩu", use_container_width=True): st.session_state.page = "change_password"; st.rerun()
+        if st.button("🚪 Đăng xuất", use_container_width=True): st.session_state.authenticated = False; st.rerun()
 
-    logo_header_path = "assets/Logo2.png"
-    img_base64 = get_base64_of_bin_file(logo_header_path)
-    if img_base64:
+    logo_h = "assets/Logo2.png"
+    img_b64 = get_base64_of_bin_file(logo_h)
+    if img_b64:
         st.markdown(f"""
         <div class="header-master-container">
             <div class="header-top-row">
-                <img src="data:image/png;base64,{img_base64}" class="header-logo-img">
+                <img src="data:image/png;base64,{img_b64}" class="header-logo-img">
                 <div class="company-text-center">
                     <div class="company-name-line">Công Ty Cổ Phần Xăng Dầu</div>
                     <div class="company-name-line">Dầu Khí Nam Định</div>
@@ -87,7 +76,7 @@ else:
                 </div>
             </div>
             <div class="separator-line"></div>
-            <div class="main-app-title">PVOIL iTPH: CHẤM CÔNG, TÍNH LƯƠNG & QUẢN LÝ NHÂN SỰ</div>
+            <div class="main-app-title">Hệ thống Quản trị Nhân sự & Chấm công Tập trung</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -95,11 +84,10 @@ else:
         render_change_password_form(db, user)
     else:
         if role in ['Admin', 'Salary_Admin', 'HR_Director', 'HR_Admin']:
-            tab_dash, tab_att, tab_hr = st.tabs(["📊 Dashboard", "📅 Bảng Chấm Công", "👥 Quản Lý Nhân Sự"])
-            with tab_dash: render_dashboard(db)
-            with tab_att: render_attendance_interface(db, user)
-            with tab_hr: render_hr_interface(db)
-        else:
-            render_attendance_interface(db, user)
+            t_dash, t_att, t_hr = st.tabs(["📊 Dashboard", "📅 Chấm Công", "👥 Nhân Sự"])
+            with t_dash: render_dashboard(db)
+            with t_att: render_attendance_interface(db, user)
+            with t_hr: render_hr_interface(db)
+        else: render_attendance_interface(db, user)
 
     st.markdown("""<div class="footer-credit">© 2026 PVOIL iTPH - Phát triển bởi <b>Nguyễn Trọng Hoàn</b> - 📞 0902069469</div>""", unsafe_allow_html=True)
