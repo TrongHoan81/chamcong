@@ -4,68 +4,91 @@ import pandas as pd
 def render_dashboard(db):
     st.header("📊 Dashboard Quản lý & Theo dõi")
     
-    # 1. Chọn kỳ báo cáo
+    # 1. Lấy danh sách năm có dữ liệu
     available_years = db.get_available_years()
-    col1, col2 = st.columns(2)
-    with col1: year = st.selectbox("Chọn năm theo dõi", available_years, key="dash_year")
-    with col2: month = st.selectbox("Chọn tháng theo dõi", range(1, 13), index=pd.Timestamp.now().month-1, key="dash_month")
+    c1, c2 = st.columns(2)
+    with c1: 
+        year = st.selectbox("Chọn năm", available_years, key="dash_year")
+    with c2: 
+        month = st.selectbox("Chọn tháng", range(1, 13), index=pd.Timestamp.now().month-1, key="dash_month")
     
-    # 2. Lấy dữ liệu
+    # 2. Tải dữ liệu
     units_df = db.get_master_data("Units")
     status_df = db.get_all_attendance_status(year, month)
     
-    # 3. Thẻ tóm tắt
+    # Đếm số lượng đơn vị
     total_units = len(units_df)
-    submitted = 0
     approved = 0
+    submitted = 0
     draft = 0
     
+    # Tính toán các chỉ số
     if not status_df.empty:
-        # Chỉ tính trên ca Normal để đếm số đơn vị
-        normal_status = status_df[status_df['Shift_Type'] == 'Normal']
-        approved = len(normal_status[normal_status['Status'] == 'Approved'])
-        submitted = len(normal_status[normal_status['Status'] == 'Submitted'])
-        draft = len(normal_status[normal_status['Status'] == 'Draft'])
+        # Lọc theo bảng công bình thường (Normal)
+        norm_status = status_df[status_df['Shift_Type'] == 'Normal']
+        approved = len(norm_status[norm_status['Status'] == 'Approved'])
+        submitted = len(norm_status[norm_status['Status'] == 'Submitted'])
+        draft = len(norm_status[norm_status['Status'] == 'Draft'])
     
+    # Số đơn vị chưa khởi tạo bảng công
     missing = total_units - (approved + submitted + draft)
+    if missing < 0: missing = 0 # Tránh số âm nếu dữ liệu sai lệch
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tổng đơn vị", total_units)
-    c2.metric("Đã duyệt ✅", approved, delta=f"{int(approved/total_units*100)}%", delta_color="normal")
-    c3.metric("Chờ duyệt ⏳", submitted)
-    c4.metric("Chưa gửi 🔴", draft + missing)
-
-    st.divider()
-    st.subheader("📍 Trạng thái chi tiết các đơn vị")
+    # 3. Hiển thị thẻ chỉ số (Gia cố lỗi chia cho 0)
+    ca, cb, cc, cd = st.columns(4)
     
-    # Chuẩn bị bảng dashboard
-    dash_data = []
-    for _, unit in units_df.iterrows():
-        u_name = unit['Unit_Name']
-        u_status = "Chưa khởi tạo"
-        if not status_df.empty:
-            match = status_df[(status_df['Unit_Name'] == u_name) & (status_df['Shift_Type'] == 'Normal')]
-            if not match.empty: u_status = match.iloc[0]['Status']
-        
-        dash_data.append({
-            "Đơn vị": u_name,
-            "Trạng thái": u_status,
-            "Hành động": "Xem chi tiết"
-        })
+    # Thẻ tổng số đơn vị
+    ca.metric("Tổng đơn vị", total_units)
     
-    df_dash = pd.DataFrame(dash_data)
+    # Thẻ Đã duyệt với tỷ lệ % (Gia cố ZeroDivisionError)
+    percentage = 0
+    if total_units > 0:
+        percentage = int((approved / total_units) * 100)
     
-    def color_status(val):
-        color = '#f1f5f9'
-        if val == 'Approved': color = '#dcfce7'
-        elif val == 'Submitted': color = '#fef9c3'
-        elif val == 'Draft': color = '#fee2e2'
-        return f'background-color: {color}'
-
-    st.dataframe(
-        df_dash.style.applymap(color_status, subset=['Trạng thái']),
-        hide_index=True,
-        use_container_width=True
+    cb.metric(
+        label="Đã duyệt ✅", 
+        value=approved, 
+        delta=f"{percentage}%" if total_units > 0 else "0%",
+        delta_color="normal"
     )
     
-    st.info("💡 Mẹo: Quản lý có thể chuyển sang tab 'Bảng Chấm Công' và chọn đơn vị tương ứng để kiểm tra hoặc phê duyệt.")
+    # Thẻ Chờ duyệt
+    cc.metric("Chờ duyệt ⏳", submitted)
+    
+    # Thẻ Chưa gửi/Chưa xong
+    cd.metric("Chưa gửi 🔴", draft + missing)
+    
+    st.divider()
+    st.subheader("📍 Trạng thái chi tiết từng đơn vị")
+    
+    # 4. Bảng chi tiết trạng thái
+    if total_units == 0:
+        st.warning("⚠️ Không tìm thấy dữ liệu đơn vị trong tab Units.")
+    else:
+        dash_data = []
+        for _, unit in units_df.iterrows():
+            u_n = unit['Unit_Name']
+            u_s = "Chưa khởi tạo"
+            
+            if not status_df.empty:
+                match = status_df[(status_df['Unit_Name'] == u_n) & (status_df['Shift_Type'] == 'Normal')]
+                if not match.empty:
+                    u_s = match.iloc[0]['Status']
+            
+            dash_data.append({"Đơn vị": u_n, "Trạng thái": u_s})
+        
+        df_display = pd.DataFrame(dash_data)
+        
+        # Định màu cho trạng thái
+        def color_status(val):
+            color = '#f1f5f9' # Mặc định xám nhạt
+            if val == 'Approved': color = '#dcfce7' # Xanh lá nhạt
+            elif val == 'Submitted': color = '#fef9c3' # Vàng nhạt
+            elif val == 'Draft': color = '#fee2e2' # Đỏ nhạt
+            return f'background-color: {color}'
+        
+        st.dataframe(
+            df_display.style.applymap(color_status, subset=['Trạng thái']),
+            hide_index=True, 
+            use_container_width=True
+        )

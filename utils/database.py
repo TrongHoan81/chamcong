@@ -3,7 +3,6 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-import numpy as np
 import json
 import os
 import time
@@ -12,19 +11,16 @@ from functools import wraps
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
 def retry_api_call(max_retries=5):
-    """Decorator hỗ trợ thử lại khi gọi API Google bị quá tải (Quota)"""
+    """Decorator hỗ trợ thử lại khi gọi API Google bị quá tải"""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             retries = 0
             while retries <= max_retries:
-                try:
-                    return func(*args, **kwargs)
+                try: return func(*args, **kwargs)
                 except gspread.exceptions.APIError as e:
                     if "429" in str(e) and retries < max_retries:
-                        time.sleep(2 ** retries)
-                        retries += 1
-                        continue
+                        time.sleep(2 ** retries + 1); retries += 1; continue
                     raise e
             return func(*args, **kwargs)
         return wrapper
@@ -39,173 +35,159 @@ class Database:
                 self.creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
             else:
                 self.creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
-            
             self.client = gspread.authorize(self.creds)
             self.master_sh = self.client.open(master_file_name)
-            self.att_sh = None
-            self.loaded_year = None
-        except Exception as e:
-            st.error(f"Lỗi kết nối Google Sheets: {e}")
+            self.att_sh = None; self.loaded_year = None
+        except Exception as e: st.error(f"Lỗi kết nối Google Sheets: {e}")
 
     @st.cache_data(ttl=600)
     def get_master_data(_self, sheet_name):
-        """Lấy dữ liệu danh mục từ Master File (có cache 10p)"""
         return _self._fetch_master_from_api(sheet_name)
 
     @retry_api_call()
     def _fetch_master_from_api(self, sheet_name):
-        worksheet = self.master_sh.worksheet(sheet_name)
-        data = worksheet.get_all_records()
-        
+        try:
+            worksheet = self.master_sh.worksheet(sheet_name)
+            data = worksheet.get_all_records()
+        except: data = []
         if not data:
-            if sheet_name == "Concurrent_Assignments":
-                return pd.DataFrame(columns=['Employee_ID', 'Full_Name', 'Unit_ID_KN', 'Unit_Name_KN', 'Position_KN', 'Effective_Date'])
-            elif sheet_name == "Positions":
-                return pd.DataFrame(columns=['Ngạch', 'Position_Name', 'Position_ID', 'Bậc 1', 'Bậc 2', 'Bậc 3', 'Bậc 4', 'Bậc 5', 'Bậc 6'])
-            elif sheet_name == "Movement_History":
-                return pd.DataFrame(columns=['Employee_ID', 'Full_Name', 'Type', 'From_Unit', 'To_Unit', 'From_Position', 'To_Position', 'Effective_Date'])
-            return pd.DataFrame()
+            schema = {
+                "Units": ['Unit_ID', 'Unit_Name', 'Status'],
+                "Positions": ['Ngạch', 'Position_Name', 'Position_ID', 'Bậc 1', 'Bậc 2', 'Bậc 3', 'Bậc 4', 'Bậc 5', 'Bậc 6', 'Bậc 7'],
+                "Employees": ['Employee_ID', 'Full_Name', 'Unit_Name', 'Position_ID', 'Status', 'Join_Date', 'Gender', 'Salary_Step', 'Allowance_Factor', 'Fixed_Allowance'],
+                "Movement_History": ['Employee_ID', 'Full_Name', 'Type', 'From_Unit', 'To_Unit', 'From_Position', 'To_Position', 'Effective_Date'],
+                "Salary_History": ['Employee_ID', 'Effective_Date', 'Position_ID', 'Salary_Step', 'Allowance_Factor', 'Fixed_Allowance', 'Decision_No', 'Note'],
+                "Concurrent_Assignments": ['Employee_ID', 'Full_Name', 'Unit_ID_KN', 'Unit_Name_KN', 'Position_KN', 'Effective_Date'],
+                "Payroll_Inputs": ['Employee_ID', 'Month', 'Year', 'Hi_Factor', 'Note'],
+                "Payroll_Configs": ['Key', 'Value']
+            }
+            return pd.DataFrame(columns=schema.get(sheet_name, []))
         return pd.DataFrame(data)
 
     def _clean_for_sheets(self, val):
-        """Làm sạch dữ liệu trước khi lưu, xử lý dấu '+' để tránh lỗi #ERROR!"""
         s = str(val).strip()
-        if s in ['nan', 'None', 'NaN', '🔒']:
-            return ""
-        if s.startswith(('+', '-', '=')):
-            return "'" + s
+        if s in ['nan', 'None', 'NaN', '🔒']: return ""
+        if s.startswith(('+', '-', '=')): return "'" + s
         return s
 
     @retry_api_call()
     def update_employee(self, employee_id, updated_data, move_log=None):
-        """Cập nhật hồ sơ nhân sự và ghi lịch sử biến động (Hỗ trợ ghi kép/nghỉ việc)"""
         try:
-            worksheet = self.master_sh.worksheet("Employees")
-            ids = worksheet.col_values(1)
-            new_row = [
-                self._clean_for_sheets(updated_data['Employee_ID']), 
-                self._clean_for_sheets(updated_data['Full_Name']),
-                self._clean_for_sheets(updated_data['Unit_Name']), 
-                self._clean_for_sheets(updated_data['Position_ID']),
-                self._clean_for_sheets(updated_data['Status']), 
-                self._clean_for_sheets(updated_data['Join_Date']),
-                self._clean_for_sheets(updated_data.get('Gender', 'M'))
-            ]
+            worksheet = self.master_sh.worksheet("Employees"); ids = worksheet.col_values(1)
+            # Dữ liệu 10 cột cho bản V2.0
+            new_row = [self._clean_for_sheets(updated_data.get('Employee_ID')), self._clean_for_sheets(updated_data.get('Full_Name')), self._clean_for_sheets(updated_data.get('Unit_Name')), self._clean_for_sheets(updated_data.get('Position_ID')), self._clean_for_sheets(updated_data.get('Status')), self._clean_for_sheets(updated_data.get('Join_Date')), self._clean_for_sheets(updated_data.get('Gender', 'Nam')), self._clean_for_sheets(updated_data.get('Salary_Step', '1')), self._clean_for_sheets(updated_data.get('Allowance_Factor', '0')), self._clean_for_sheets(updated_data.get('Fixed_Allowance', '0'))]
             search_id = str(employee_id).strip()
-            if search_id and search_id in ids:
-                target_row = ids.index(search_id) + 1
-                worksheet.update(f"A{target_row}:G{target_row}", [new_row], value_input_option='USER_ENTERED')
-            else:
-                worksheet.append_row(new_row, value_input_option='USER_ENTERED')
-            
+            if search_id in ids:
+                row_idx = ids.index(search_id) + 1
+                worksheet.update(f"A{row_idx}:J{row_idx}", [new_row], value_input_option='USER_ENTERED')
+            else: worksheet.append_row(new_row, value_input_option='USER_ENTERED')
             if move_log:
                 ws_log = self.master_sh.worksheet("Movement_History")
                 logs = move_log if isinstance(move_log, list) else [move_log]
-                for log in logs:
-                    ws_log.append_row([
-                        self._clean_for_sheets(employee_id), 
-                        self._clean_for_sheets(updated_data['Full_Name']),
-                        self._clean_for_sheets(log['type']), 
-                        self._clean_for_sheets(log.get('from', '-')), 
-                        self._clean_for_sheets(log.get('to', '-')),
-                        self._clean_for_sheets(log.get('from_pos', '-')),
-                        self._clean_for_sheets(log.get('to_pos', '-')),
-                        self._clean_for_sheets(log['date'])
-                    ], value_input_option='USER_ENTERED')
-            st.cache_data.clear()
+                for lg in logs: ws_log.append_row([self._clean_for_sheets(employee_id), self._clean_for_sheets(updated_data['Full_Name']), self._clean_for_sheets(lg['type']), self._clean_for_sheets(lg.get('from', '-')), self._clean_for_sheets(lg.get('to', '-')), self._clean_for_sheets(lg.get('from_pos', '-')), self._clean_for_sheets(lg.get('to_pos', '-')), self._clean_for_sheets(lg['date'])], value_input_option='USER_ENTERED')
             return True
-        except Exception as e:
-            st.error(f"Lỗi cập nhật dữ liệu: {e}")
-            return False
-
-    @retry_api_call()
-    def update_concurrent_assignment(self, emp_id, name, unit_id, unit_name, pos):
-        """Lưu bản ghi kiêm nhiệm mới"""
-        try:
-            ws = self.master_sh.worksheet("Concurrent_Assignments")
-            new_row = [self._clean_for_sheets(emp_id), self._clean_for_sheets(name), self._clean_for_sheets(unit_id), self._clean_for_sheets(unit_name), self._clean_for_sheets(pos), datetime.now().strftime("%d/%m/%Y")]
-            ws.append_row(new_row, value_input_option='USER_ENTERED')
-            st.cache_data.clear(); return True
-        except: return False
-
-    @retry_api_call()
-    def delete_concurrent_assignment(self, emp_id, unit_id):
-        """Xóa bản ghi kiêm nhiệm"""
-        try:
-            ws = self.master_sh.worksheet("Concurrent_Assignments")
-            data = ws.get_all_values()
-            for i, row in enumerate(data):
-                if str(row[0]).strip() == str(emp_id).strip() and str(row[2]).strip() == str(unit_id).strip():
-                    ws.delete_rows(i + 1); st.cache_data.clear(); return True
-            return False
-        except: return False
+        except Exception as e: raise e
 
     @retry_api_call()
     def get_attendance_data(self, year, month, unit_name, shift_type="Normal"):
-        """Lấy dữ liệu chấm công"""
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
         try:
-            worksheet = sh.worksheet("Attendance_Data")
-            df = pd.DataFrame(worksheet.get_all_records())
-            return df[(df['Month'] == int(month)) & (df['Unit_Name'] == unit_name) & (df['Shift_Type'] == (shift_type if shift_type != "Hazardous" else "Normal"))]
+            ws = sh.worksheet("Attendance_Data"); df = pd.DataFrame(ws.get_all_records())
+            return df[(df['Month'].astype(str).str.lstrip('0') == str(month)) & (df['Unit_Name'] == unit_name) & (df['Shift_Type'] == (shift_type if shift_type != "Hazardous" else "Normal"))]
         except: return pd.DataFrame()
 
     @retry_api_call()
     def save_attendance(self, df_to_save, year, month, unit_name, shift_type="Normal"):
-        """Lưu bảng công"""
         sh = self._open_att_file(year)
         if not sh: return False
-        worksheet = sh.worksheet("Attendance_Data")
-        all_data = pd.DataFrame(worksheet.get_all_records())
+        ws = sh.worksheet("Attendance_Data"); all_data = pd.DataFrame(ws.get_all_records())
         calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
         cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name', 'Shift_Type'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
         df_to_save['Year'] = int(year); df_to_save['Month'] = int(month); df_to_save['Unit_Name'] = unit_name; df_to_save['Shift_Type'] = shift_type
         df_to_save = df_to_save.reindex(columns=cols, fill_value="")
         if not all_data.empty:
-            mask = (all_data['Month'] == int(month)) & (all_data['Unit_Name'] == unit_name) & (all_data['Shift_Type'] == shift_type)
+            mask = (all_data['Month'].astype(str).str.lstrip('0') == str(month)) & (all_data['Unit_Name'] == unit_name) & (all_data['Shift_Type'] == shift_type)
             final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True)
         else: final_df = df_to_save
         final_list = [final_df.columns.tolist()]
-        for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(val) for val in row])
-        worksheet.clear(); worksheet.update(final_list, value_input_option='USER_ENTERED'); return True
+        for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in row])
+        ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
+
+    @retry_api_call()
+    def get_all_attendance_status(self, year, month):
+        sh = self._open_att_file(year)
+        if not sh: return pd.DataFrame()
+        try:
+            ws = sh.worksheet("Attendance_Data"); df = pd.DataFrame(ws.get_all_records())
+            if df.empty: return pd.DataFrame()
+            df['Month_Match'] = df['Month'].astype(str).str.lstrip('0')
+            return df[df['Month_Match'] == str(month)][['Unit_Name', 'Shift_Type', 'Status']].drop_duplicates()
+        except: return pd.DataFrame()
+
+    @retry_api_call()
+    def get_full_attendance_year(self, year):
+        """LƯƠNG: Nạp 1 lần chạy cả năm (Chống Quota 429)"""
+        sh = self._open_att_file(year)
+        if not sh: return pd.DataFrame()
+        try:
+            ws = sh.worksheet("Attendance_Data")
+            return pd.DataFrame(ws.get_all_records())
+        except: return pd.DataFrame()
 
     def _open_att_file(self, year):
         if self.loaded_year == str(year) and self.att_sh: return self.att_sh
         try:
-            self.att_sh = self.client.open(f"GasTime_Attendance_{year}"); self.loaded_year = str(year); return self.att_sh
+            self.att_sh = self.client.open(f"GasTime_Attendance_{year}")
+            self.loaded_year = str(year); return self.att_sh
         except: return None
 
     @retry_api_call()
     def get_available_years(self):
-        """Quét Drive nhận diện các năm dữ liệu"""
         try:
             all_sh = self.client.openall(); years = [int(s.title.split("_")[-1]) for s in all_sh if s.title.startswith("GasTime_Attendance_")]
             return sorted(list(set(years)), reverse=True) if years else [datetime.now().year]
         except: return [datetime.now().year]
 
     @retry_api_call()
-    def get_all_attendance_status(self, year, month):
-        """Lấy trạng thái chấm công phục vụ Dashboard"""
-        sh = self._open_att_file(year)
-        if not sh: return pd.DataFrame()
+    def save_payroll_inputs(self, df, year, month):
         try:
-            worksheet = sh.worksheet("Attendance_Data")
-            df = pd.DataFrame(worksheet.get_all_records())
-            if df.empty: return pd.DataFrame()
-            return df[df['Month'] == int(month)][['Unit_Name', 'Shift_Type', 'Status']].drop_duplicates()
-        except: return pd.DataFrame()
+            ws = self.master_sh.worksheet("Payroll_Inputs"); all_data = pd.DataFrame(ws.get_all_records())
+            if not all_data.empty:
+                mask = (all_data['Month'].astype(str).str.lstrip('0') == str(month)) & (all_data['Year'].astype(str) == str(year))
+                final_df = pd.concat([all_data[~mask], df], ignore_index=True)
+            else: final_df = df
+            final_list = [final_df.columns.tolist()]
+            for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in row])
+            ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); st.cache_data.clear(); return True
+        except: return False
 
     @retry_api_call()
     def update_user_password(self, username, new_password):
         try:
-            worksheet = self.master_sh.worksheet("Users"); usernames = worksheet.col_values(1)
-            if username in usernames:
-                row_idx = usernames.index(username) + 1; worksheet.update_cell(row_idx, 2, str(new_password)); st.cache_data.clear(); return True
+            ws = self.master_sh.worksheet("Users"); names = ws.col_values(1)
+            if username in names:
+                idx = names.index(username) + 1; ws.update_cell(idx, 2, str(new_password)); st.cache_data.clear(); return True
+            return False
+        except: return False
+
+    @retry_api_call()
+    def update_concurrent_assignment(self, emp_id, name, u_id, u_name, pos):
+        try:
+            ws = self.master_sh.worksheet("Concurrent_Assignments")
+            ws.append_row([self._clean_for_sheets(emp_id), name, u_id, u_name, pos, datetime.now().strftime("%d/%m/%Y")], value_input_option='USER_ENTERED'); st.cache_data.clear(); return True
+        except: return False
+
+    @retry_api_call()
+    def delete_concurrent_assignment(self, emp_id, u_id):
+        try:
+            ws = self.master_sh.worksheet("Concurrent_Assignments"); data = ws.get_all_values()
+            for i, row in enumerate(data):
+                if str(row[0]).strip() == str(emp_id).strip() and str(row[2]).strip() == str(u_id).strip():
+                    ws.delete_rows(i + 1); st.cache_data.clear(); return True
             return False
         except: return False
 
 def init_db():
-    if 'db' not in st.session_state:
-        st.session_state.db = Database('credentials.json', 'GasTime_Master_Data')
+    if 'db' not in st.session_state: st.session_state.db = Database('credentials.json', 'GasTime_Master_Data')
     return st.session_state.db

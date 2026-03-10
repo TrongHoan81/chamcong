@@ -6,8 +6,9 @@ from modules.auth import render_login, render_change_password_form
 from modules.attendance import render_attendance_interface
 from modules.hr import render_hr_interface
 from modules.dashboard import render_dashboard
+from modules.payroll import render_payroll_interface
 
-# Cấu hình trang nòng cốt
+# Cấu hình hệ thống V1.12
 st.set_page_config(
     page_title="PVOIL iTPH - PVOIL Nam Định", 
     page_icon="assets/Logo1.png" if os.path.exists("assets/Logo1.png") else "⛽", 
@@ -21,9 +22,8 @@ def get_base64_of_bin_file(bin_file):
                 data = f.read()
             return base64.b64encode(data).decode()
         return None
-    except Exception: return None
+    except: return None
 
-# Giao diện đóng băng PVOIL Standard
 st.markdown("""
 <style>
 :root { --pvoil-red: #ed1c24; --pvoil-blue: #00529b; --slate-800: #1e293b; --slate-100: #f1f5f9; }
@@ -53,9 +53,8 @@ else:
         logo_sidebar = "assets/Logo1.png"
         if os.path.exists(logo_sidebar): st.image(logo_sidebar, use_container_width=True)
         st.divider()
-        st.title("PVOIL iTPH v1.7")
+        st.title("PVOIL iTPH v1.12")
         st.markdown(f"👤 **{user['Full_Name']}**")
-        st.caption(f"Vai trò: {role}")
         st.caption(f"Đơn vị: {user.get('Unit_Managed', 'N/A')}")
         st.divider()
         if st.button("🔄 Làm mới Master", use_container_width=True): st.cache_data.clear(); st.rerun()
@@ -83,11 +82,13 @@ else:
     if st.session_state.page == "change_password":
         render_change_password_form(db, user)
     else:
-        if role in ['Admin', 'Salary_Admin', 'HR_Director', 'HR_Admin']:
-            t_dash, t_att, t_hr = st.tabs(["📊 Dashboard", "📅 Chấm Công", "👥 Nhân Sự"])
+        if role in ['Admin', 'Salary_Admin', 'HR_Director']:
+            t_dash, t_att, t_hr, t_pay = st.tabs(["📊 Dashboard", "📅 Chấm Công", "👥 Nhân Sự", "💰 Tính Lương"])
             with t_dash: render_dashboard(db)
             with t_att: render_attendance_interface(db, user)
             with t_hr: render_hr_interface(db)
-        else: render_attendance_interface(db, user)
+            with t_pay: render_payroll_interface(db)
+        else:
+            render_attendance_interface(db, user)
 
     st.markdown("""<div class="footer-credit">© 2026 PVOIL iTPH - Phát triển bởi <b>Nguyễn Trọng Hoàn</b> - 📞 0902069469</div>""", unsafe_allow_html=True)
