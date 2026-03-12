@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 
 def calculate_ncd(year, month, is_product_based):
+    """Tính ngày công chế độ chuẩn đơn vị"""
     try:
         num_days = calendar.monthrange(int(year), int(month))[1]
         ncd = 0
@@ -19,6 +20,7 @@ def calculate_ncd(year, month, is_product_based):
     except: return 26
 
 def clean_decimal(val):
+    """Hóa giải dấu chấm/phẩy thập phân"""
     if isinstance(val, (int, float)): return float(val)
     s = str(val).strip()
     if not s or s.lower() in ['nan', 'none']: return 0.0
@@ -32,6 +34,7 @@ def clean_decimal(val):
     except: return 0.0
 
 def calculate_pit_v3(tntt, pit_consts):
+    """Tính thuế TNCN lũy tiến 5 bậc linh động"""
     if tntt <= 0: return 0
     r1 = pit_consts.get('TAX_LV1_RATE', 5.0) / 100.0
     l2 = pit_consts.get('TAX_LV2_LIMIT', 10000000.0); r2 = pit_consts.get('TAX_LV2_RATE', 10.0) / 100.0; s2 = pit_consts.get('TAX_LV2_SUB', 500000.0)
@@ -45,6 +48,7 @@ def calculate_pit_v3(tntt, pit_consts):
     else: return tntt * r5 - s5
 
 def get_effective_salary_record(emp_id, month, year, salary_history_df, employees_df):
+    """Hồi tưởng lịch sử lương/chức danh"""
     emp_id = str(emp_id).strip()
     end_of_month = datetime(int(year), int(month), calendar.monthrange(int(year), int(month))[1])
     if not salary_history_df.empty and 'Employee_ID' in salary_history_df.columns:
@@ -62,6 +66,7 @@ def render_engine_time_tab(ctx):
     units_df, p_df, sh_df = ctx['units'], ctx['positions'], ctx['salary_history']
     e_df, cfg_df, in_df = ctx['employees'], ctx['configs'], ctx['inputs']
 
+    # --- 1. THIẾT LẬP THƯỢNG TẦNG ---
     ALL_SNAP_COLS = [
         "Year", "Month", "Unit_ID", "Employee_ID", "Full_Name", "Position_ID",
         "NC Đi làm", "Tiền Đi làm", "NC Khác", "Tiền Khác", "Tiền lương CDCV",
@@ -98,18 +103,30 @@ def render_engine_time_tab(ctx):
     else: st.warning(f"⚠️ Chưa có dữ liệu lương cho tháng này.")
     if is_locked: st.warning(f"🔒 Bảng lương tháng {month}/{year} đã được PHÊ DUYỆT. Các chức năng tính toán bị khóa.")
 
+    # --- 2. KHỐI TIỆN ÍCH UPLOAD (V5.3: Lọc theo đơn vị đã duyệt công) ---
     with st.expander("📥 Quản lý Thu nhập bất thường (Excel)", expanded=not is_locked):
         c_tpl, c_upl = st.columns(2)
-        template_cols = ['Employee_ID', 'Full_Name', 'Tiền thêm giờ TTN', 'Tiền thêm giờ KTTN', 'Tiền bồi dưỡng trực', 
+        template_cols = ['Đơn vị', 'Employee_ID', 'Full_Name', 'Tiền thêm giờ TTN', 'Tiền thêm giờ KTTN', 'Tiền bồi dưỡng trực', 
                          'KT chi từ QKT', 'KT chi từ CP SXKD', 'Phúc lợi ốm đau', 'TNK KTT', 'TNK', 'Tiền bồi dưỡng độc hại', 'PP tiền lương']
-        office_emps_active = e_df[~e_df['Unit_Name'].str.startswith("ND") & (e_df['Status'] == 'Active')]
-        tpl_df = office_emps_active[['Employee_ID', 'Full_Name']].reindex(columns=template_cols).fillna(0)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer: tpl_df.to_excel(writer, index=False, sheet_name='Payroll_Inputs')
-        c_tpl.download_button("📂 Tải file Template mẫu", output.getvalue(), f"Template_Thu_Nhap_{month}_{year}.xlsx")
+        
+        # LOGIC MỚI V5.3: Lấy danh sách các đơn vị đã phê duyệt chấm công
+        all_att_status = db.get_all_attendance_status(year, month)
+        approved_units = all_att_status[(all_att_status['Status'] == 'Approved') & (all_att_status['Shift_Type'] == 'Normal')]['Unit_Name'].tolist() if not all_att_status.empty else []
+        
+        # Chỉ lấy nhân sự thuộc các đơn vị đã duyệt
+        office_emps_active = e_df[~e_df['Unit_Name'].str.startswith("ND") & (e_df['Status'] == 'Active')].copy()
+        tpl_emps = office_emps_active[office_emps_active['Unit_Name'].isin(approved_units)].copy()
+        
+        if tpl_emps.empty:
+            c_tpl.warning("⚠️ Chưa có đơn vị nào được phê duyệt chấm công trong tháng này để tải Template.")
+        else:
+            tpl_df = tpl_emps.rename(columns={'Unit_Name': 'Đơn vị'})[['Đơn vị', 'Employee_ID', 'Full_Name']].reindex(columns=template_cols).fillna(0)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer: tpl_df.to_excel(writer, index=False, sheet_name='Payroll_Inputs')
+            c_tpl.download_button("📂 Tải file Template mẫu", output.getvalue(), f"Template_Thu_Nhap_{month}_{year}.xlsx")
         
         if not is_locked:
-            uploaded_file = c_upl.file_uploader("Tải lên dữ liệu thu nhập", type=["xlsx"], key="upl_pay_v51_seal")
+            uploaded_file = c_upl.file_uploader("Tải lên dữ liệu thu nhập", type=["xlsx"], key="upl_pay_v53")
             if uploaded_file:
                 try:
                     up_df = pd.read_excel(uploaded_file)
@@ -120,21 +137,23 @@ def render_engine_time_tab(ctx):
                 except: st.error("Lỗi đọc file Excel.")
 
     st.divider()
-    col_groups = {
-        "Hồ sơ": ["Unit_ID", "Employee_ID", "Full_Name", "Position_ID"],
-        "Ngày công": ["NC Đi làm", "Tiền Đi làm", "NC Khác", "Tiền Khác", "Tiền lương CDCV"],
-        "Thu nhập bổ sung": ["Tiền thêm giờ TTN", "Tiền thêm giờ KTTN", "Hpc", "Tiền ca 3", "Tiền bồi dưỡng trực", "KT chi từ QKT", "KT chi từ CP SXKD", "Phụ cấp ATV", "Tiền ăn ca", "Tiền bồi dưỡng độc hại", "Phúc lợi ốm đau", "TNK KTT", "TNK", "PP tiền lương"],
-        "Chốt số": ["BHXH, BHYT, BHTN", "Thuế TNCN", "TỔNG SỐ", "THỰC LĨNH"]
-    }
-    selected_groups = st.multiselect("Chọn nhóm cột hiển thị", list(col_groups.keys()), default=["Hồ sơ", "Ngày công", "Chốt số"])
+    # --- 3. BỘ LỌC HIỂN THỊ CỘT ---
+    flat_cols_list = ["Unit_ID", "Đơn vị", "Employee_ID", "Full_Name", "Position_ID", "NC Đi làm", "Tiền Đi làm", "NC Khác", "Tiền Khác", "Tiền lương CDCV", "Tiền thêm giờ TTN", "Tiền thêm giờ KTTN", "Hpc", "Tiền ca 3", "Tiền bồi dưỡng trực", "KT chi từ QKT", "KT chi từ CP SXKD", "Phụ cấp ATV", "Tiền ăn ca", "Tiền bồi dưỡng độc hại", "Tiền vượt khoán 2", "Phúc lợi ốm đau", "TNK KTT", "TNK", "BHXH, BHYT, BHTN", "Thuế TNCN", "TỔNG SỐ", "THỰC LĨNH", "PP tiền lương"]
+    default_cols = ["Đơn vị", "Employee_ID", "Full_Name", "Position_ID", "NC Đi làm", "Tiền Đi làm", "Tiền lương CDCV", "BHXH, BHYT, BHTN", "Thuế TNCN", "TỔNG SỐ", "THỰC LĨNH"]
+    
+    st.write("⚙️ **Tùy chọn hiển thị cột chi tiết:**")
+    active_cols_sel = st.multiselect("Tích chọn các cột muốn hiển thị", flat_cols_list, default=default_cols)
+    
     unit_opts = ["Tất cả"] + sorted(office_units)
     sel_unit = st.selectbox("🎯 Lọc theo đơn vị", unit_opts)
 
+    # --- 4. ENGINE TÍNH TOÁN (NIÊM PHONG LOGIC THUẾ V5.2) ---
     calc_label = "▶️ Chạy tính toán lương tổng hợp" if current_mode == "EMPTY" else "🔄 Tính toán lại bảng lương"
     if st.button(calc_label, disabled=is_locked, type="secondary" if current_mode == "EMPTY" else "primary"):
         with st.spinner("Đang thực hiện tính toán..."):
-            all_att_status = db.get_all_attendance_status(year, month)
-            approved_units = all_att_status[(all_att_status['Status'] == 'Approved') & (all_att_status['Shift_Type'] == 'Normal')]['Unit_Name'].tolist() if not all_att_status.empty else []
+            all_att_status_calc = db.get_all_attendance_status(year, month)
+            approved_units_calc = all_att_status_calc[(all_att_status_calc['Status'] == 'Approved') & (all_att_status_calc['Shift_Type'] == 'Normal')]['Unit_Name'].tolist() if not all_att_status_calc.empty else []
+            
             all_att = db.get_full_attendance_year(year)
             if all_att.empty: st.error("❌ Không tìm thấy dữ liệu chấm công."); return
             curr_att = all_att[all_att['Month'].astype(float).astype(int) == int(month)].copy()
@@ -154,7 +173,7 @@ def render_engine_time_tab(ctx):
 
             for _, emp in target_emps.iterrows():
                 eid, uname = str(emp['Employee_ID']).strip(), str(emp['Unit_Name']).strip()
-                if uname not in approved_units: continue
+                if uname not in approved_units_calc: continue
                 sal_rec = get_effective_salary_record(eid, month, year, sh_df, e_df)
                 pos_id, u_id = str(sal_rec.get('Position_ID', '')).strip(), unit_id_map.get(uname, '')
                 
@@ -175,12 +194,15 @@ def render_engine_time_tab(ctx):
                 t_atv, t_anca = (250000 if eid in atv_winners else 0), (nc_dilam * 60000)
                 t_dochai = min(get_ex('Tiền bồi dưỡng độc hại'), nc_dilam * 13000) if (pos_id == "LX" or u_id == "VP_KTC" or u_id.startswith("ND")) else 0
                 
-                npt = int(clean_decimal(emp.get('Dependents', 0)))
-                tntt = max(0, (l_cdcv + t_ca3 + t_ttn + t_sxkd + t_tnk) - (15500000 + npt * 6200000))
-                tax = round(calculate_pit_v3(tntt, pit_consts))
+                # Logic Thuế V5.2: Khấu trừ BHXH trước khi tính thuế (BẢO TỒN)
                 bh_sal = clean_decimal(emp.get('Insurance_Salary', (h_sl + clean_decimal(sal_rec.get('Allowance_Factor', 0))) * m1_val))
                 bhxh = round(min(bh_sal, 46800000) * 0.105)
-                tong_so = l_cdcv + t_ca3 + t_pc + t_ttn + t_kttn + t_truc + t_qkt + t_sxkd + t_atv + t_anca + t_dochai + t_om + t_ktt + t_tnk + pp_l
+                
+                npt = int(clean_decimal(emp.get('Dependents', 0)))
+                tn_chiu_thue = l_cdcv + t_ca3 + t_ttn + t_sxkd + t_tnk
+                giam_tru_gia_canh = (15500000 + npt * 6200000)
+                tntt = max(0, tn_chiu_thue - (giam_tru_gia_canh + bhxh))
+                tax = round(calculate_pit_v3(tntt, pit_consts))
                 
                 raw_results.append({
                     "Year": year, "Month": month, "Unit_ID": u_id, "Employee_ID": eid, "Full_Name": emp['Full_Name'], "Position_ID": pos_id, "Đơn vị": uname,
@@ -188,13 +210,16 @@ def render_engine_time_tab(ctx):
                     "Tiền thêm giờ TTN": t_ttn, "Tiền thêm giờ KTTN": t_kttn, "Hpc": t_pc, "Tiền ca 3": t_ca3, "Tiền bồi dưỡng trực": t_truc, 
                     "KT chi từ QKT": t_qkt, "KT chi từ CP SXKD": t_sxkd, "Phụ cấp ATV": t_atv, "Tiền ăn ca": t_anca, "Tiền bồi dưỡng độc hại": t_dochai, 
                     "Tiền vượt khoán 2": 0, "Phúc lợi ốm đau": t_om, "TNK KTT": t_ktt, "TNK": t_tnk, "BHXH, BHYT, BHTN": bhxh, "Thuế TNCN": tax,
-                    "TỔNG SỐ": tong_so, "THỰC LĨNH": tong_so - bhxh - tax - t_kttn, "PP tiền lương": pp_l, "Status": pay_status, "Type": "Detail"
+                    "TỔNG SỐ": l_cdcv + t_ca3 + t_pc + t_ttn + t_kttn + t_truc + t_qkt + t_sxkd + t_atv + t_anca + t_dochai + t_om + t_ktt + t_tnk + pp_l,
+                    "THỰC LĨNH": (l_cdcv + t_ca3 + t_pc + t_ttn + t_kttn + t_truc + t_qkt + t_sxkd + t_atv + t_anca + t_dochai + t_om + t_ktt + t_tnk + pp_l) - bhxh - tax - t_kttn,
+                    "PP tiền lương": pp_l, "Status": pay_status, "Type": "Detail"
                 })
 
             st.session_state[ram_raw_key] = pd.DataFrame(raw_results).reindex(columns=WORKING_COLS)
             st.session_state[ram_mode_key] = "CALCULATED"
             st.success("✅ Tính toán thành công!"); st.rerun()
 
+    # --- 5. HIỂN THỊ PHÂN TẦNG (BẢO TỒN V5.2 Logic) ---
     if ram_raw_key in st.session_state:
         full_df = st.session_state[ram_raw_key]
         display_units = office_units if sel_unit == "Tất cả" else [sel_unit]
@@ -219,12 +244,12 @@ def render_engine_time_tab(ctx):
             final_list.append(grand)
 
         report_df = pd.DataFrame(final_list)
-        active_cols = []
-        for g in selected_groups: active_cols.extend(col_groups[g])
-        extra_cols_check = col_groups["Thu nhập bổ sung"]
-        for ec in extra_cols_check:
-            if ec in report_df.columns and (report_df[ec].apply(clean_decimal).sum() == 0) and ec in active_cols:
-                active_cols = [x for x in active_cols if x != ec]
+        final_active_cols = []
+        for ac in active_cols_sel:
+            if ac in report_df.columns:
+                if ac in num_cols:
+                    if report_df[ac].apply(clean_decimal).sum() != 0: final_active_cols.append(ac)
+                else: final_active_cols.append(ac)
 
         def style_rows(row):
             t = row.get('Type', 'Detail')
@@ -234,11 +259,12 @@ def render_engine_time_tab(ctx):
             return [''] * len(row)
 
         st.dataframe(
-            report_df[active_cols + ['Type']].style.apply(style_rows, axis=1).format({c: "{:,.0f}" for c in num_cols}, na_rep=""),
+            report_df[final_active_cols + ['Type']].style.apply(style_rows, axis=1).format({c: "{:,.0f}" for c in num_cols if c in final_active_cols}, na_rep=""),
             column_config={"Type": None, "Unit_ID": "Mã ĐV", "Employee_ID": "Mã NV", "Full_Name": "Họ và tên", "Position_ID": "CD"},
             hide_index=True, use_container_width=True
         )
         
+        # --- 6. NÚT ĐIỀU KHIỂN GHI CLOUD ---
         st.divider()
         c1, c2, c3 = st.columns(3)
         if c1.button("💾 Lưu nháp (Draft)", disabled=is_locked, use_container_width=True):
