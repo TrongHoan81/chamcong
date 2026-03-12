@@ -58,10 +58,12 @@ def get_effective_salary_record(emp_id, month, year, salary_history_df, employee
     return None
 
 def render_engine_time_tab(ctx):
+    """Giao diện tính lương V5.1 - Tự động truy xuất dữ liệu gốc"""
     db, year, month = ctx['db'], ctx['year'], ctx['month']
     units_df, p_df, sh_df = ctx['units'], ctx['positions'], ctx['salary_history']
     e_df, cfg_df, in_df = ctx['employees'], ctx['configs'], ctx['inputs']
 
+    # --- 1. THIẾT LẬP THƯỢNG TẦNG ---
     ALL_SNAP_COLS = [
         "Year", "Month", "Unit_ID", "Employee_ID", "Full_Name", "Position_ID",
         "NC Đi làm", "Tiền Đi làm", "NC Khác", "Tiền Khác", "Tiền lương CDCV",
@@ -72,15 +74,18 @@ def render_engine_time_tab(ctx):
     ]
     WORKING_COLS = ["Đơn vị"] + ALL_SNAP_COLS + ["Type"]
     unit_id_map = units_df.set_index('Unit_Name')['Unit_ID'].to_dict() if not units_df.empty else {}
-    unit_name_map = {v: k for k, v in unit_id_map.items()}
+    unit_name_map = {v: k for k, v in unit_id_map.items()} # Bản đồ ngược để hiển thị
     office_units = units_df[~units_df['Unit_ID'].astype(str).str.startswith("ND")]['Unit_Name'].tolist() if not units_df.empty else []
     
+    # Quản lý RAM cho dữ liệu lương
     ram_raw_key = f"payroll_raw_{month}_{year}"
     ram_mode_key = f"payroll_mode_{month}_{year}"
 
+    # --- 2. TỰ ĐỘNG TRUY XUẤT (AUTO-LOAD) ---
     if ram_raw_key not in st.session_state:
         saved_data = db.get_payroll_data(year, month)
         if not saved_data.empty:
+            # GIA CỐ: Dịch ngược Unit_ID sang Đơn vị và gán Type=Detail cho dữ liệu từ Cloud
             saved_data['Đơn vị'] = saved_data['Unit_ID'].map(unit_name_map).fillna(saved_data['Unit_ID'])
             saved_data['Type'] = "Detail"
             st.session_state[ram_raw_key] = saved_data.reindex(columns=WORKING_COLS)
@@ -93,11 +98,17 @@ def render_engine_time_tab(ctx):
     is_locked = (pay_status == "Approved")
     
     st.subheader(f"Quyết toán thu nhập tổng hợp - Tháng {month}/{year}")
-    if current_mode == "RETRIEVED": st.info(f"📂 Đang hiển thị dữ liệu ĐÃ LƯU từ Cloud (Trạng thái: **{pay_status}**)")
-    elif current_mode == "CALCULATED": st.success(f"🧮 Đang hiển thị kết quả TÍNH TOÁN MỚI (Chưa lưu/Duyệt)")
-    else: st.warning(f"⚠️ Chưa có dữ liệu lương cho tháng này.")
-    if is_locked: st.warning(f"🔒 Bảng lương tháng {month}/{year} đã được PHÊ DUYỆT. Các chức năng tính toán bị khóa.")
+    
+    if current_mode == "RETRIEVED":
+        st.info(f"📂 Đang hiển thị dữ liệu ĐÃ LƯU từ Cloud (Trạng thái: **{pay_status}**)")
+    elif current_mode == "CALCULATED":
+        st.success(f"🧮 Đang hiển thị kết quả TÍNH TOÁN MỚI (Chưa lưu/Duyệt)")
+    else:
+        st.warning(f"⚠️ Chưa có dữ liệu lương cho tháng này. Vui lòng chạy tính toán.")
 
+    if is_locked: st.warning(f"🔒 Bảng lương tháng {month}/{year} đã được PHÊ DUYỆT. Các chức năng tính toán và lưu trữ bị khóa.")
+
+    # --- 3. KHỐI TIỆN ÍCH UPLOAD ---
     with st.expander("📥 Quản lý Thu nhập bất thường (Excel)", expanded=not is_locked):
         c_tpl, c_upl = st.columns(2)
         template_cols = ['Employee_ID', 'Full_Name', 'Tiền thêm giờ TTN', 'Tiền thêm giờ KTTN', 'Tiền bồi dưỡng trực', 
@@ -109,7 +120,7 @@ def render_engine_time_tab(ctx):
         c_tpl.download_button("📂 Tải file Template mẫu", output.getvalue(), f"Template_Thu_Nhap_{month}_{year}.xlsx")
         
         if not is_locked:
-            uploaded_file = c_upl.file_uploader("Tải lên dữ liệu thu nhập", type=["xlsx"], key="upl_pay_v51_seal")
+            uploaded_file = c_upl.file_uploader("Tải lên dữ liệu thu nhập", type=["xlsx"], key="upl_pay_v51")
             if uploaded_file:
                 try:
                     up_df = pd.read_excel(uploaded_file)
@@ -119,6 +130,7 @@ def render_engine_time_tab(ctx):
                         st.success("✅ Đã nạp dữ liệu từ Excel!"); time.sleep(0.5); st.rerun()
                 except: st.error("Lỗi đọc file Excel.")
 
+    # --- 4. BỘ LỌC HIỂN THỊ CỘT ---
     st.divider()
     col_groups = {
         "Hồ sơ": ["Unit_ID", "Employee_ID", "Full_Name", "Position_ID"],
@@ -130,15 +142,16 @@ def render_engine_time_tab(ctx):
     unit_opts = ["Tất cả"] + sorted(office_units)
     sel_unit = st.selectbox("🎯 Lọc theo đơn vị", unit_opts)
 
-    calc_label = "▶️ Chạy tính toán lương tổng hợp" if current_mode == "EMPTY" else "🔄 Tính toán lại bảng lương"
-    if st.button(calc_label, disabled=is_locked, type="secondary" if current_mode == "EMPTY" else "primary"):
+    # --- 5. ENGINE TÍNH TOÁN (KHI CÓ YÊU CẦU) ---
+    calc_btn_label = "▶️ Chạy tính toán lương tổng hợp" if current_mode == "EMPTY" else "🔄 Tính toán lại bảng lương"
+    if st.button(calc_btn_label, disabled=is_locked, type="secondary" if current_mode == "EMPTY" else "primary"):
         with st.spinner("Đang thực hiện tính toán..."):
             all_att_status = db.get_all_attendance_status(year, month)
             approved_units = all_att_status[(all_att_status['Status'] == 'Approved') & (all_att_status['Shift_Type'] == 'Normal')]['Unit_Name'].tolist() if not all_att_status.empty else []
             all_att = db.get_full_attendance_year(year)
             if all_att.empty: st.error("❌ Không tìm thấy dữ liệu chấm công."); return
             curr_att = all_att[all_att['Month'].astype(float).astype(int) == int(month)].copy()
-            if curr_att.empty: st.error(f"❌ Không tìm thấy dữ liệu công Tháng {month}/{year}."); return
+            if curr_att.empty: st.error(f"❌ Không tìm thấy dữ liệu chấm công Tháng {month}/{year}."); return
 
             day_cols = [f'd{i}' for i in range(1, 32)]
             extra_in = st.session_state.get(f"extra_income_{month}_{year}", pd.DataFrame())
@@ -158,30 +171,36 @@ def render_engine_time_tab(ctx):
                 sal_rec = get_effective_salary_record(eid, month, year, sh_df, e_df)
                 pos_id, u_id = str(sal_rec.get('Position_ID', '')).strip(), unit_id_map.get(uname, '')
                 
+                # Công
                 att_row = curr_att[(curr_att['Unit_Name'] == uname) & (curr_att['Shift_Type'] == 'Normal') & (curr_att['Employee_ID'].astype(str).str.strip() == eid)]
                 nc_dilam = int(att_row[day_cols].isin(['+']).values.sum()) if not att_row.empty else 0
                 nc_khac = int(att_row[day_cols].isin(['P', 'H', 'L']).values.sum()) if not att_row.empty else 0
+                
+                # Lương & Thuế (Bảo tồn V4.9 Logic)
                 h_sl = clean_decimal(p_df[p_df['Position_ID'] == pos_id].iloc[0][f"Bậc {sal_rec.get('Salary_Step', '1')}"]) if not p_df[p_df['Position_ID'] == pos_id].empty else 0.0
                 h_i = clean_decimal(in_df[(in_df['Employee_ID'].astype(str).str.strip() == eid) & (in_df['Month'].astype(float).astype(int) == int(month))]['Hi_Factor'].iloc[0]) if not in_df.empty else 1.0
-                
                 don_gia = (h_sl * m1_val / ncd_office) if ncd_office > 0 else 0
                 t_dilam, t_khac = round(don_gia * nc_dilam * h_i), round(don_gia * nc_khac * h_i)
-                l_cdcv, nc_ca3 = t_dilam + t_khac, int(curr_att[(curr_att['Unit_Name'] == uname) & (curr_att['Shift_Type'] == 'Shift 3') & (curr_att['Employee_ID'].astype(str).str.strip() == eid)][day_cols].isin(['+']).values.sum()) if not curr_att.empty else 0
-                t_ca3, t_pc = round(don_gia * nc_ca3 * 0.3), round(clean_decimal(sal_rec.get('Allowance_Factor', 0)) * m1_val) if clean_decimal(sal_rec.get('Allowance_Factor', 0)) > 0 else clean_decimal(sal_rec.get('Fixed_Allowance', 0))
+                l_cdcv = t_dilam + t_khac
+                nc_ca3 = int(curr_att[(curr_att['Unit_Name'] == uname) & (curr_att['Shift_Type'] == 'Shift 3') & (curr_att['Employee_ID'].astype(str).str.strip() == eid)][day_cols].isin(['+']).values.sum()) if not curr_att.empty else 0
+                t_ca3 = round(don_gia * nc_ca3 * 0.3)
+                t_pc = round(clean_decimal(sal_rec.get('Allowance_Factor', 0)) * m1_val) if clean_decimal(sal_rec.get('Allowance_Factor', 0)) > 0 else clean_decimal(sal_rec.get('Fixed_Allowance', 0))
 
                 row_ex = extra_in[extra_in['Employee_ID'].astype(str).str.strip() == eid] if not extra_in.empty else pd.DataFrame()
                 def get_ex(col): return round(clean_decimal(row_ex[col].iloc[0])) if not row_ex.empty and col in row_ex.columns else 0
                 t_ttn, t_kttn, t_truc, t_qkt, t_sxkd, t_om, t_ktt, t_tnk, pp_l = get_ex('Tiền thêm giờ TTN'), get_ex('Tiền thêm giờ KTTN'), get_ex('Tiền bồi dưỡng trực'), get_ex('KT chi từ QKT'), get_ex('KT chi từ CP SXKD'), get_ex('Phúc lợi ốm đau'), get_ex('TNK KTT'), get_ex('TNK'), get_ex('PP tiền lương')
+                
                 t_atv, t_anca = (250000 if eid in atv_winners else 0), (nc_dilam * 60000)
-                t_dochai = min(get_ex('Tiền bồi dưỡng độc hại'), nc_dilam * 13000) if (pos_id == "LX" or u_id == "VP_KTC" or u_id.startswith("ND")) else 0
+                is_obj_dochai = (pos_id == "LX" or u_id == "VP_KTC" or u_id.startswith("ND"))
+                t_dochai = min(get_ex('Tiền bồi dưỡng độc hại'), nc_dilam * 13000) if is_obj_dochai else 0
                 
                 npt = int(clean_decimal(emp.get('Dependents', 0)))
                 tntt = max(0, (l_cdcv + t_ca3 + t_ttn + t_sxkd + t_tnk) - (15500000 + npt * 6200000))
                 tax = round(calculate_pit_v3(tntt, pit_consts))
                 bh_sal = clean_decimal(emp.get('Insurance_Salary', (h_sl + clean_decimal(sal_rec.get('Allowance_Factor', 0))) * m1_val))
                 bhxh = round(min(bh_sal, 46800000) * 0.105)
-                tong_so = l_cdcv + t_ca3 + t_pc + t_ttn + t_kttn + t_truc + t_qkt + t_sxkd + t_atv + t_anca + t_dochai + t_om + t_ktt + t_tnk + pp_l
                 
+                tong_so = l_cdcv + t_ca3 + t_pc + t_ttn + t_kttn + t_truc + t_qkt + t_sxkd + t_atv + t_anca + t_dochai + t_om + t_ktt + t_tnk + pp_l
                 raw_results.append({
                     "Year": year, "Month": month, "Unit_ID": u_id, "Employee_ID": eid, "Full_Name": emp['Full_Name'], "Position_ID": pos_id, "Đơn vị": uname,
                     "NC Đi làm": nc_dilam, "Tiền Đi làm": t_dilam, "NC Khác": nc_khac, "Tiền Khác": t_khac, "Tiền lương CDCV": l_cdcv,
@@ -195,6 +214,7 @@ def render_engine_time_tab(ctx):
             st.session_state[ram_mode_key] = "CALCULATED"
             st.success("✅ Tính toán thành công!"); st.rerun()
 
+    # --- 6. HIỂN THỊ PHÂN TẦNG ---
     if ram_raw_key in st.session_state:
         full_df = st.session_state[ram_raw_key]
         display_units = office_units if sel_unit == "Tất cả" else [sel_unit]
@@ -221,6 +241,8 @@ def render_engine_time_tab(ctx):
         report_df = pd.DataFrame(final_list)
         active_cols = []
         for g in selected_groups: active_cols.extend(col_groups[g])
+        
+        # Auto-hide rỗng
         extra_cols_check = col_groups["Thu nhập bổ sung"]
         for ec in extra_cols_check:
             if ec in report_df.columns and (report_df[ec].apply(clean_decimal).sum() == 0) and ec in active_cols:
@@ -239,12 +261,13 @@ def render_engine_time_tab(ctx):
             hide_index=True, use_container_width=True
         )
         
+        # --- 7. NÚT ĐIỀU KHIỂN GHI CLOUD ---
         st.divider()
         c1, c2, c3 = st.columns(3)
         if c1.button("💾 Lưu nháp (Draft)", disabled=is_locked, use_container_width=True):
             save_df = full_df[full_df['Type'] == 'Detail'][ALL_SNAP_COLS]
             if db.save_payroll_data(save_df, year, month, status="Draft", creator=st.session_state.user['Full_Name']):
-                st.success("✅ Đã lưu nháp!"); time.sleep(1); st.rerun()
+                st.success("✅ Đã lưu bản nháp thành công!"); time.sleep(1); st.rerun()
         
         if c2.button("✅ Duyệt bảng lương (Approved)", disabled=is_locked, use_container_width=True, type="primary"):
             save_df = full_df[full_df['Type'] == 'Detail'][ALL_SNAP_COLS]

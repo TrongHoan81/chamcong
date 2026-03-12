@@ -151,12 +151,14 @@ class Database:
 
     @retry_api_call()
     def get_payroll_data(self, year, month):
+        """HÀM MỚI: Truy xuất dữ liệu lương đã lưu cho một tháng cụ thể"""
         sh = self._open_pay_file(year)
         if not sh: return pd.DataFrame()
         try:
             ws = sh.worksheet("Payroll_Data")
             df = pd.DataFrame(ws.get_all_records())
             if df.empty: return pd.DataFrame()
+            # Lọc chính xác theo tháng
             df['Month_Match'] = df['Month'].astype(str).str.lstrip('0')
             return df[df['Month_Match'] == str(month)].drop(columns=['Month_Match'])
         except: return pd.DataFrame()
