@@ -58,37 +58,41 @@ def calculate_summary_logic(df, active_days, is_direct_labor):
     return pd.DataFrame(rows)
 
 def render_attendance_interface(db, user_info, forced_unit=None):
-    """BẢO TỒN LOGIC TỪ BẢN COPY CỦA ÔNG - FIX SYNTAX 2026"""
     role, my_unit = user_info['Role'], str(user_info.get('Unit_Managed', '')).strip()
-    st.header("📅 Bảng chấm công (V2.6 - Fixed)")
+    st.header("📅 Bảng chấm công (V2.5 - Stable)")
     
+    # 1. Tải dữ liệu danh mục
     units_df = db.get_master_data("Units")
     if units_df.empty: st.warning("⚠️ Không tìm thấy dữ liệu đơn vị."); return
 
     available_years = db.get_available_years()
     c_m, c_y, c_s = st.columns([1.5, 1, 1.5])
-    with c_y: year = st.selectbox("Năm", available_years, key="att_y_v26")
-    with c_m: month = st.selectbox("Tháng", range(1, 13), index=datetime.now().month-1, key="att_m_v26")
+    with c_y: year = st.selectbox("Năm", available_years, key="att_y_v25")
+    with c_m: month = st.selectbox("Tháng", range(1, 13), index=datetime.now().month-1, key="att_m_v25")
     
-    unit_name = forced_unit if forced_unit else (my_unit if role == 'Manager' else st.selectbox("Chọn đơn vị", units_df['Unit_Name'].tolist(), key="att_u_v26"))
+    unit_name = forced_unit if forced_unit else (my_unit if role == 'Manager' else st.selectbox("Chọn đơn vị", units_df['Unit_Name'].tolist(), key="att_u_v25"))
     u_row = units_df[units_df['Unit_Name'] == unit_name]
     u_id = str(u_row.iloc[0]['Unit_ID']) if not u_row.empty else ""
     
     shift_opts = ["Normal"]
     if u_id in ["VP_KTC", "VP_TCHC"]: shift_opts.append("Shift 3")
     if u_id.startswith("ND") or u_id in ["VP_KTC", "VP_KDXD"]: shift_opts.append("Hazardous")
-    with c_s: shift_type = st.selectbox("Loại bảng công", shift_opts, format_func=lambda x: "Hành chính/SP" if x == "Normal" else ("Ca 3" if x == "Shift 3" else "Độc hại"), key="att_s_v26")
+    with c_s: shift_type = st.selectbox("Loại bảng công", shift_opts, format_func=lambda x: "Hành chính/SP" if x == "Normal" else ("Ca 3" if x == "Shift 3" else "Độc hại"), key="att_s_v25")
     
     is_owner = (unit_name == my_unit) or (role == 'Admin')
     num_days = get_days_in_month(year, month); active_days = [f"d{i}" for i in range(1, num_days + 1)]
 
+    # --- KHỐI LỆNH TỐI ƯU: CHỈ CHẠY KHI ĐỔI ĐIỀU KIỆN LỌC ---
     init_key = f"init_v25_{year}_{month}_{unit_name}_{shift_type}"
     if init_key not in st.session_state:
         with st.spinner("Đang chuẩn bị bảng công..."):
             e_df, h_df = db.get_master_data("Employees"), db.get_master_data("Movement_History")
             kn_df = db.get_master_data("Concurrent_Assignments")
-            target_employees = e_df[e_df['Unit_Name'] == unit_name].copy(); target_employees['Ghi chú'] = ""
             
+            target_employees = e_df[e_df['Unit_Name'] == unit_name].copy()
+            target_employees['Ghi chú'] = ""
+            
+            # Gộp Kiêm nhiệm
             assigned_kn = kn_df[kn_df['Unit_Name_KN'] == unit_name].copy()
             for _, row in assigned_kn.iterrows():
                 orig = e_df[e_df['Employee_ID'].astype(str).str.strip() == str(row['Employee_ID']).strip()]
@@ -96,6 +100,7 @@ def render_attendance_interface(db, user_info, forced_unit=None):
                     kn_row = orig.iloc[0].copy(); kn_row['Position_ID'] = row['Position_KN']; kn_row['Ghi chú'] = "KN"
                     target_employees = pd.concat([target_employees, pd.DataFrame([kn_row])])
             
+            # Gộp Điều động
             hist_rel = h_df.copy(); hist_rel['dt'] = pd.to_datetime(hist_rel['Effective_Date'], format='%d/%m/%Y', errors='coerce')
             for eid in hist_rel[hist_rel['dt'].dt.month == month]['Employee_ID'].unique():
                 if str(eid).strip() not in target_employees['Employee_ID'].astype(str).values:
@@ -104,11 +109,12 @@ def render_attendance_interface(db, user_info, forced_unit=None):
                         if not orig.empty:
                             new_row = orig.iloc[0].copy(); new_row['Ghi chú'] = "Điều động"; target_employees = pd.concat([target_employees, pd.DataFrame([new_row])])
 
+            # Lấy dữ liệu từ Cloud và LÀM SẠCH "None"
             ext_att = db.get_attendance_data(year, month, unit_name, "Normal" if shift_type == "Hazardous" else shift_type)
             status = ext_att['Status'].iloc[0] if not ext_att.empty else "Draft"
             
             if not ext_att.empty:
-                disp_df = ext_att.copy().fillna("")
+                disp_df = ext_att.copy().fillna("") # TRIỆT TIÊU "None"
                 if 'Ghi chú' not in disp_df.columns: disp_df['Ghi chú'] = ""
                 for d in active_days: disp_df[d] = disp_df[d].fillna("").astype(str).str.lstrip("'").replace('nan', '')
                 saved_ids = disp_df['Employee_ID'].astype(str).str.strip().tolist()
@@ -118,8 +124,10 @@ def render_attendance_interface(db, user_info, forced_unit=None):
                     disp_df = pd.concat([disp_df, pd.DataFrame([new_r])], ignore_index=True)
             else:
                 disp_df = pd.DataFrame({'Employee_ID': target_employees['Employee_ID'].astype(str).str.strip(), 'Employee_Name': target_employees['Full_Name'], 'Position_ID': target_employees['Position_ID'], 'Ghi chú': target_employees['Ghi chú']})
-                for i in range(1, 32): disp_df[f"d{i}"] = ""; disp_df['Status'] = "Draft"
+                for i in range(1, 32): disp_df[f"d{i}"] = ""
+                disp_df['Status'] = "Draft"
 
+            # Ánh xạ Position và 🔒 ban đầu (Khởi tạo RAM)
             note_map = target_employees.set_index('Employee_ID')['Ghi chú'].to_dict()
             for idx, row in disp_df.iterrows():
                 eid = str(row['Employee_ID']).strip()
@@ -128,15 +136,23 @@ def render_attendance_interface(db, user_info, forced_unit=None):
                 v_days = get_working_window(eid, unit_name, month, year, h_df, e_df)
                 for d in range(1, num_days + 1):
                     col = f"d{d}"; val = str(disp_df.at[idx, col]).strip()
-                    if d not in v_days: disp_df.at[idx, col] = "🔒"
-                    elif val == "🔒": disp_df.at[idx, col] = ""
+                    if d not in v_days:
+                        disp_df.at[idx, col] = "🔒" # Cưỡng bức khóa ngày không thuộc đơn vị
+                    elif val == "🔒": 
+                        disp_df.at[idx, col] = "" # Tẩy ổ khóa nếu ngày đó thuộc đơn vị
             
+            # ĐÓNG BĂNG VÀO RAM
             st.session_state[init_key] = disp_df.reset_index(drop=True)
             st.session_state[f"{init_key}_status"] = status
 
-    work_df = st.session_state[init_key]; status = st.session_state[f"{init_key}_status"]
+    # Lấy dữ liệu đã đóng băng để hiển thị
+    work_df = st.session_state[init_key]
+    status = st.session_state[f"{init_key}_status"]
+    
+    # KHÔI PHỤC 🔒 VÀO DANH SÁCH (Để Streamlit nhận diện và hiển thị ký hiệu)
     allowed = ["", "+", "Ô", "Cô", "TS", "T", "P", "L", "H", "NB", "KL", "N", "🔒"]
     if shift_type == "Shift 3": allowed = ["", "+", "🔒"]
+    
     col_order = ['Employee_ID', 'Employee_Name', 'Position_ID']
     if not work_df[work_df['Ghi chú'].astype(str) != ""].empty: col_order.append('Ghi chú')
     col_order += active_days + ['Status']
@@ -147,53 +163,105 @@ def render_attendance_interface(db, user_info, forced_unit=None):
         config[f"d{i}"] = st.column_config.SelectboxColumn(label=f"{i:02d}/{wd}", options=allowed, width="small", disabled=status in ["Submitted", "Approved"] or not is_owner or shift_type == "Hazardous")
 
     st.subheader(f"Bảng công {month}/{year}")
-    edited_df = st.data_editor(work_df[col_order], column_config=config, hide_index=True, width="stretch", key=f"editor_v26_{init_key}")
-    st.session_state[init_key].update(edited_df); current_ram_df = st.session_state[init_key]
+    
+    edited_df = st.data_editor(
+        work_df[col_order], 
+        column_config=config, 
+        hide_index=True, 
+        use_container_width=True, 
+        key=f"editor_v25_{init_key}"
+    )
+    
+    # Cập nhật RAM (Ghi nhận những gì người dùng vừa thao tác)
+    st.session_state[init_key].update(edited_df)
+    current_ram_df = st.session_state[init_key]
 
-    st.markdown("""<div style="background-color: #f8fafc; padding: 10px; border-radius: 5px; border-left: 5px solid #00529b; margin-top: 10px; font-size: 0.85rem;"><strong>📌 Hướng dẫn ký hiệu:</strong> (+) Làm việc | P Phép | L Lễ | Ô Ốm | Cô Con ốm | TS Thai sản | T Tai nạn | NB Nghỉ bù | KL Không lương | N Ngừng việc | 🔒 Ngoài biên chế</div>""", unsafe_allow_html=True)
+    # --- HƯỚNG DẪN KÝ HIỆU CHẤM CÔNG ---
+    st.markdown("""
+    <div style="background-color: #f8fafc; padding: 10px; border-radius: 5px; border-left: 5px solid #00529b; margin-top: 10px; font-size: 0.85rem;">
+        <strong>📌 Hướng dẫn ký hiệu:</strong> 
+        <span style="margin-left: 15px;"><b>(+)</b>: Làm việc</span> | 
+        <span style="margin-left: 10px;"><b>P</b>: Phép</span> | 
+        <span style="margin-left: 10px;"><b>L</b>: Lễ/Tết</span> | 
+        <span style="margin-left: 10px;"><b>Ô</b>: Ốm</span> | 
+        <span style="margin-left: 10px;"><b>Cô</b>: Con ốm</span> | 
+        <span style="margin-left: 10px;"><b>TS</b>: Thai sản</span> | 
+        <span style="margin-left: 10px;"><b>T</b>: Tai nạn</span> | 
+        <span style="margin-left: 10px;"><b>NB</b>: Nghỉ bù</span> | 
+        <span style="margin-left: 10px;"><b>KL</b>: Không lương</span> | 
+        <span style="margin-left: 10px;"><b>N</b>: Ngừng việc</span> | 
+        <span style="margin-left: 10px;"><b>🔒</b>: Ngày không thuộc đơn vị</span>
+    </div>
+    """, unsafe_allow_html=True)
+
     calc = calculate_summary_logic(current_ram_df, active_days, u_id.startswith("ND"))
     st.subheader("📊 Tổng hợp công")
-    st.dataframe(pd.concat([current_ram_df[['Employee_ID', 'Employee_Name']], calc], axis=1), hide_index=True, width="stretch")
+    st.dataframe(pd.concat([current_ram_df[['Employee_ID', 'Employee_Name']], calc], axis=1), hide_index=True, use_container_width=True)
     
     c1, c2, c3, c4, c5 = st.columns(5)
-    if st.button("🔄 Nạp lại dữ liệu gốc", width="stretch"): del st.session_state[init_key]; st.rerun()
+    
+    if st.button("🔄 Nạp lại dữ liệu gốc (Hủy thay đổi chưa lưu)", use_container_width=True):
+        del st.session_state[init_key]; st.rerun()
 
     def do_save(new_status):
-        save_df = st.session_state[init_key].copy(); save_df['Year'], save_df['Month'], save_df['Unit_Name'], save_df['Shift_Type'] = year, month, unit_name, shift_type
-        h_df_l, e_df_l = db.get_master_data("Movement_History"), db.get_master_data("Employees")
+        # 1. Lấy dữ liệu từ RAM
+        save_df = st.session_state[init_key].copy()
+        
+        # 2. Làm sạch metadata & RESET 🔒 CƯỠNG BỨC (CHỐT CHẶN CUỐI)
+        save_df['Year'], save_df['Month'], save_df['Unit_Name'], save_df['Shift_Type'] = year, month, unit_name, shift_type
+        
+        h_df_latest = db.get_master_data("Movement_History")
+        e_df_latest = db.get_master_data("Employees")
+        
         for idx, row in save_df.iterrows():
-            eid = str(row['Employee_ID']).strip(); v_d = get_working_window(eid, unit_name, month, year, h_df_l, e_df_l)
+            eid = str(row['Employee_ID']).strip()
+            v_d = get_working_window(eid, unit_name, month, year, h_df_latest, e_df_latest)
             for d in range(1, num_days + 1):
-                col = f"d{d}"; val = str(save_df.at[idx, col]).strip()
-                if d not in v_d: 
+                col = f"d{d}"
+                val = str(save_df.at[idx, col]).strip()
+                if d not in v_d:
+                    # NGOÀI CỬA SỔ: Nếu lỡ xóa hoặc chấm sai -> Ép về 🔒
                     if val != "🔒": save_df.at[idx, col] = "🔒"
-                elif val == "🔒": save_df.at[idx, col] = ""
+                else:
+                    # TRONG CỬA SỔ: Nếu lỡ chấm 🔒 -> Tẩy về rỗng "" (Coi như không đi làm)
+                    if val == "🔒": save_df.at[idx, col] = ""
+        
+        # 3. Gộp kết quả tính toán mới nhất
         final_calc = calculate_summary_logic(save_df, active_days, u_id.startswith("ND"))
         for c in final_calc.columns:
             if c in save_df.columns: save_df = save_df.drop(columns=[c])
-        save_df = pd.concat([save_df, final_calc], axis=1); save_df['Status'] = new_status
-        if db.save_attendance(save_df, year, month, unit_name, shift_type if shift_type != "Hazardous" else "Normal"):
-            st.session_state[f"{init_key}_status"] = new_status; st.cache_data.clear(); del st.session_state[init_key]; return True
+        
+        save_df = pd.concat([save_df, final_calc], axis=1)
+        save_df['Status'] = new_status
+        
+        with st.spinner("Đang chấn chỉnh logic 🔒 và lưu lên Cloud..."):
+            if db.save_attendance(save_df, year, month, unit_name, shift_type if shift_type != "Hazardous" else "Normal"):
+                st.session_state[f"{init_key}_status"] = new_status
+                st.cache_data.clear()
+                del st.session_state[init_key] # Xóa RAM để nạp lại bản sạch từ Cloud
+                return True
         return False
 
     if status == "Draft" and is_owner and shift_type != "Hazardous":
-        if c1.button("💾 Lưu nháp", width="stretch"): 
-            if do_save("Draft"): st.success("✅ Đã lưu!"); time.sleep(1); st.rerun()
-        if c2.button("🚀 Gửi duyệt", width="stretch"):
-            if do_save("Submitted"): st.success("🚀 Đã chốt!"); time.sleep(1); st.rerun()
+        if c1.button("💾 Lưu nháp", use_container_width=True): 
+            if do_save("Draft"): st.success("✅ Đã kiểm soát và lưu!"); time.sleep(1); st.rerun()
+        if c2.button("🚀 Gửi duyệt", use_container_width=True):
+            if do_save("Submitted"): st.success("🚀 Đã chốt và gửi!"); time.sleep(1); st.rerun()
             
     if role in ['Admin', 'Salary_Admin', 'HR_Director']:
         if status == "Submitted":
-            if c1.button("✅ Duyệt", width="stretch", type="primary"):
+            if c1.button("✅ Duyệt", use_container_width=True, type="primary"):
                 if do_save("Approved"): st.success("✅ Đã duyệt!"); time.sleep(1); st.rerun()
-            if c3.button("🔓 Mở sửa", width="stretch"):
+            if c3.button("🔓 Mở sửa", use_container_width=True):
                 if do_save("Draft"): st.success("🔓 Đã mở!"); time.sleep(1); st.rerun()
-        elif status == "Approved" and c3.button("🔓 Mở lại", width="stretch"):
+        elif status == "Approved" and c3.button("🔓 Mở lại", use_container_width=True):
             if do_save("Draft"): st.success("🔓 Đã mở!"); time.sleep(1); st.rerun()
     
+    # Chuẩn bị dữ liệu sạch để xuất file (Xóa 🔒 và cột trùng)
     clean_exp = current_ram_df.copy().replace("🔒", "")
     for c in calc.columns:
         if c in clean_exp.columns: clean_exp = clean_exp.drop(columns=[c])
     clean_exp = pd.concat([clean_exp, calc], axis=1)
-    c4.download_button("📄 PDF", export_attendance_pdf(clean_exp, unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{month}_{year}.pdf", width="stretch")
-    c5.download_button("Excel", export_attendance_excel(clean_exp, unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{month}_{year}.xlsx", width="stretch")
+
+    c4.download_button("📄 PDF", export_attendance_pdf(clean_exp, unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{month}_{year}.pdf", use_container_width=True)
+    c5.download_button("Excel", export_attendance_excel(clean_exp, unit_name, month, year, status, shift_type), f"BCC_{unit_name}_{month}_{year}.xlsx", use_container_width=True)

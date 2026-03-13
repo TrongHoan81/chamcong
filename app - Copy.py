@@ -8,7 +8,7 @@ from modules.hr import render_hr_interface
 from modules.dashboard import render_dashboard
 from modules.payroll import render_payroll_interface
 
-# Cấu hình hệ thống V1.14 - FIX: 2026 Syntax
+# Cấu hình hệ thống V1.12
 st.set_page_config(
     page_title="PVOIL iTPH - PVOIL Nam Định", 
     page_icon="assets/Logo1.png" if os.path.exists("assets/Logo1.png") else "⛽", 
@@ -51,15 +51,15 @@ else:
     
     with st.sidebar:
         logo_sidebar = "assets/Logo1.png"
-        if os.path.exists(logo_sidebar): st.image(logo_sidebar, width="stretch")
+        if os.path.exists(logo_sidebar): st.image(logo_sidebar, use_container_width=True)
         st.divider()
-        st.title("PVOIL iTPH v1.14")
+        st.title("PVOIL iTPH v1.12")
         st.markdown(f"👤 **{user['Full_Name']}**")
         st.caption(f"Đơn vị: {user.get('Unit_Managed', 'N/A')}")
         st.divider()
-        if st.button("🔄 Làm mới Master", width="stretch"): st.cache_data.clear(); st.rerun()
-        if st.button("🔑 Đổi mật khẩu", width="stretch"): st.session_state.page = "change_password"; st.rerun()
-        if st.button("🚪 Đăng xuất", width="stretch"): st.session_state.authenticated = False; st.rerun()
+        if st.button("🔄 Làm mới Master", use_container_width=True): st.cache_data.clear(); st.rerun()
+        if st.button("🔑 Đổi mật khẩu", use_container_width=True): st.session_state.page = "change_password"; st.rerun()
+        if st.button("🚪 Đăng xuất", use_container_width=True): st.session_state.authenticated = False; st.rerun()
 
     logo_h = "assets/Logo2.png"
     img_b64 = get_base64_of_bin_file(logo_h)

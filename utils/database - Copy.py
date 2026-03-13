@@ -8,18 +8,30 @@ import os
 import time
 from functools import wraps
 
+# Phạm vi truy cập Google API
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
 def retry_api_call(max_retries=5):
+    """
+    GIA CỐ V2.3: Tự động thử lại khi gặp lỗi 429 (Quota), 500 (Internal), 503 (Unavailable).
+    Giúp ứng dụng vượt qua giai đoạn 'Cold Start' trên Render.
+    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             retries = 0
             while retries <= max_retries:
-                try: return func(*args, **kwargs)
+                try:
+                    return func(*args, **kwargs)
                 except gspread.exceptions.APIError as e:
-                    if "429" in str(e) and retries < max_retries:
-                        time.sleep(2 ** retries + 1); retries += 1; continue
+                    error_msg = str(e)
+                    # Kiểm tra các mã lỗi phổ biến cần thử lại
+                    if any(code in error_msg for code in ["429", "500", "503"]) and retries < max_retries:
+                        # Tăng thời gian chờ theo hàm mũ: 2s, 4s, 8s...
+                        wait_time = (2 ** retries) + 1
+                        time.sleep(wait_time)
+                        retries += 1
+                        continue
                     raise e
             return func(*args, **kwargs)
         return wrapper
@@ -35,9 +47,24 @@ class Database:
             else:
                 self.creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
             self.client = gspread.authorize(self.creds)
-            self.master_sh = self.client.open(master_file_name)
+            
+            # GIA CỐ: Thử lại việc mở file Master nếu Google báo lỗi 500 ở giây đầu tiên
+            self.master_sh = self._open_with_retry(master_file_name)
+            
             self.att_sh = None; self.pay_sh = None; self.loaded_att_year = None; self.loaded_pay_year = None
-        except Exception as e: st.error(f"Lỗi kết nối Google Sheets: {e}")
+        except Exception as e:
+            st.error(f"Lỗi kết nối Google Sheets: {e}")
+
+    def _open_with_retry(self, file_name, retries=3):
+        """Hàm hỗ trợ mở file có cơ chế thử lại nội bộ"""
+        for i in range(retries):
+            try:
+                return self.client.open(file_name)
+            except Exception as e:
+                if i < retries - 1:
+                    time.sleep(2)
+                    continue
+                raise e
 
     @st.cache_data(ttl=600)
     def get_master_data(_self, sheet_name):
@@ -97,6 +124,7 @@ class Database:
 
     @retry_api_call()
     def get_all_attendance_status(self, year, month):
+        """Khôi phục hàm Dashboard phục vụ niêm phong chuẩn"""
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
         try:
@@ -151,14 +179,12 @@ class Database:
 
     @retry_api_call()
     def get_payroll_data(self, year, month):
-        """HÀM MỚI: Truy xuất dữ liệu lương đã lưu cho một tháng cụ thể"""
         sh = self._open_pay_file(year)
         if not sh: return pd.DataFrame()
         try:
             ws = sh.worksheet("Payroll_Data")
             df = pd.DataFrame(ws.get_all_records())
             if df.empty: return pd.DataFrame()
-            # Lọc chính xác theo tháng
             df['Month_Match'] = df['Month'].astype(str).str.lstrip('0')
             return df[df['Month_Match'] == str(month)].drop(columns=['Month_Match'])
         except: return pd.DataFrame()

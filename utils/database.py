@@ -25,9 +25,8 @@ def retry_api_call(max_retries=5):
                     return func(*args, **kwargs)
                 except gspread.exceptions.APIError as e:
                     error_msg = str(e)
-                    # Kiểm tra các mã lỗi phổ biến cần thử lại
+                    # Chốt chặn API: Bắt thêm lỗi 500, 503
                     if any(code in error_msg for code in ["429", "500", "503"]) and retries < max_retries:
-                        # Tăng thời gian chờ theo hàm mũ: 2s, 4s, 8s...
                         wait_time = (2 ** retries) + 1
                         time.sleep(wait_time)
                         retries += 1
@@ -48,7 +47,7 @@ class Database:
                 self.creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
             self.client = gspread.authorize(self.creds)
             
-            # GIA CỐ: Thử lại việc mở file Master nếu Google báo lỗi 500 ở giây đầu tiên
+            # Mở file Master với cơ chế thử lại để tránh lỗi 500 khi Render vừa thức dậy
             self.master_sh = self._open_with_retry(master_file_name)
             
             self.att_sh = None; self.pay_sh = None; self.loaded_att_year = None; self.loaded_pay_year = None
@@ -56,7 +55,6 @@ class Database:
             st.error(f"Lỗi kết nối Google Sheets: {e}")
 
     def _open_with_retry(self, file_name, retries=3):
-        """Hàm hỗ trợ mở file có cơ chế thử lại nội bộ"""
         for i in range(retries):
             try:
                 return self.client.open(file_name)
@@ -124,7 +122,6 @@ class Database:
 
     @retry_api_call()
     def get_all_attendance_status(self, year, month):
-        """Khôi phục hàm Dashboard phục vụ niêm phong chuẩn"""
         sh = self._open_att_file(year)
         if not sh: return pd.DataFrame()
         try:
