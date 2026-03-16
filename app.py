@@ -8,7 +8,7 @@ from modules.hr import render_hr_interface
 from modules.dashboard import render_dashboard
 from modules.payroll import render_payroll_interface
 
-# Cấu hình hệ thống V1.14 - FIX: 2026 Syntax
+# Cấu hình hệ thống V1.15 - NIÊM PHONG 2026
 st.set_page_config(
     page_title="PVOIL iTPH - PVOIL Nam Định", 
     page_icon="assets/Logo1.png" if os.path.exists("assets/Logo1.png") else "⛽", 
@@ -53,7 +53,7 @@ else:
         logo_sidebar = "assets/Logo1.png"
         if os.path.exists(logo_sidebar): st.image(logo_sidebar, width="stretch")
         st.divider()
-        st.title("PVOIL iTPH v1.14")
+        st.title("PVOIL iTPH v1.15")
         st.markdown(f"👤 **{user['Full_Name']}**")
         st.caption(f"Đơn vị: {user.get('Unit_Managed', 'N/A')}")
         st.divider()

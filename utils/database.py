@@ -12,10 +12,7 @@ from functools import wraps
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
 def retry_api_call(max_retries=5):
-    """
-    GIA CỐ V2.3: Tự động thử lại khi gặp lỗi 429 (Quota), 500 (Internal), 503 (Unavailable).
-    Giúp ứng dụng vượt qua giai đoạn 'Cold Start' trên Render.
-    """
+    """Lá chắn API: Thử lại khi nghẽn mạng hoặc lỗi 500/429/503"""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -23,12 +20,10 @@ def retry_api_call(max_retries=5):
             while retries <= max_retries:
                 try:
                     return func(*args, **kwargs)
-                except gspread.exceptions.APIError as e:
+                except Exception as e:
                     error_msg = str(e)
-                    # Chốt chặn API: Bắt thêm lỗi 500, 503
                     if any(code in error_msg for code in ["429", "500", "503"]) and retries < max_retries:
-                        wait_time = (2 ** retries) + 1
-                        time.sleep(wait_time)
+                        time.sleep((2 ** retries) + 1)
                         retries += 1
                         continue
                     raise e
@@ -46,54 +41,55 @@ class Database:
             else:
                 self.creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
             self.client = gspread.authorize(self.creds)
-            
-            # Mở file Master với cơ chế thử lại để tránh lỗi 500 khi Render vừa thức dậy
             self.master_sh = self._open_with_retry(master_file_name)
-            
             self.att_sh = None; self.pay_sh = None; self.loaded_att_year = None; self.loaded_pay_year = None
         except Exception as e:
-            st.error(f"Lỗi kết nối Google Sheets: {e}")
+            st.error(f"Lỗi kết nối Database: {e}")
 
     def _open_with_retry(self, file_name, retries=3):
         for i in range(retries):
-            try:
-                return self.client.open(file_name)
-            except Exception as e:
-                if i < retries - 1:
-                    time.sleep(2)
-                    continue
-                raise e
+            try: return self.client.open(file_name)
+            except: 
+                if i < retries - 1: time.sleep(2); continue
+                raise
 
     @st.cache_data(ttl=600)
     def get_master_data(_self, sheet_name):
-        return _self._fetch_master_from_api(sheet_name)
-
-    @retry_api_call()
-    def _fetch_master_from_api(self, sheet_name):
         try:
-            worksheet = self.master_sh.worksheet(sheet_name)
-            data = worksheet.get_all_records()
-        except: data = []
-        return pd.DataFrame(data)
+            ws = _self.master_sh.worksheet(sheet_name)
+            return pd.DataFrame(ws.get_all_records())
+        except: return pd.DataFrame()
 
     def _clean_for_sheets(self, val):
         if pd.isna(val) or val is None or str(val).strip() in ['nan', 'None', 'NaN', '🔒']: return ""
         s = str(val).strip()
-        if s.startswith(('+', '-', '=')): return "'" + s
-        return s
+        return "'" + s if s.startswith(('+', '-', '=')) else s
 
     @retry_api_call()
     def update_employee(self, employee_id, updated_data, move_log=None):
+        """BẢO TỒN & TỐI ƯU QUOTA: Cập nhật hồ sơ và lịch sử biến động"""
         try:
-            worksheet = self.master_sh.worksheet("Employees"); ids = worksheet.col_values(1)
-            new_row = [self._clean_for_sheets(updated_data.get('Employee_ID')), self._clean_for_sheets(updated_data.get('Full_Name')), self._clean_for_sheets(updated_data.get('Unit_Name')), self._clean_for_sheets(updated_data.get('Position_ID')), self._clean_for_sheets(updated_data.get('Status')), self._clean_for_sheets(updated_data.get('Join_Date')), self._clean_for_sheets(updated_data.get('Gender', 'Nam')), self._clean_for_sheets(updated_data.get('Salary_Step', '1')), self._clean_for_sheets(updated_data.get('Allowance_Factor', '0')), self._clean_for_sheets(updated_data.get('Fixed_Allowance', '0')), self._clean_for_sheets(updated_data.get('ATV', '')), self._clean_for_sheets(updated_data.get('Dependents', '0')), self._clean_for_sheets(updated_data.get('Insurance_Salary', '0'))]
-            search_id = str(employee_id).strip()
-            if search_id in ids:
-                row_idx = ids.index(search_id) + 1
-                worksheet.update(f"A{row_idx}:M{row_idx}", [new_row], value_input_option='USER_ENTERED')
-            else: worksheet.append_row(new_row, value_input_option='USER_ENTERED')
+            ws_emp = self.master_sh.worksheet("Employees")
+            ids = ws_emp.col_values(1)
+            row = [self._clean_for_sheets(updated_data.get(k, "")) for k in ['Employee_ID', 'Full_Name', 'Unit_Name', 'Position_ID', 'Status', 'Join_Date', 'Gender', 'Salary_Step', 'Allowance_Factor', 'Fixed_Allowance', 'ATV', 'Dependents', 'Insurance_Salary']]
+            eid_str = str(employee_id).strip()
+            
+            if eid_str in ids:
+                ws_emp.update(f"A{ids.index(eid_str)+1}:M{ids.index(eid_str)+1}", [row], value_input_option='USER_ENTERED')
+            else: 
+                ws_emp.append_row(row, value_input_option='USER_ENTERED')
+
+            if move_log:
+                ws_hist = self.master_sh.worksheet("Movement_History")
+                logs = [move_log] if isinstance(move_log, dict) else move_log
+                rows = [[eid_str, updated_data.get('Full_Name',''), l.get('type',''), l.get('from',''), l.get('to',''), l.get('from_pos',''), l.get('to_pos',''), l.get('date','')] for l in logs]
+                ws_hist.append_rows(rows, value_input_option='USER_ENTERED')
+            
+            # FIX QUOTA: Loại bỏ st.cache_data.clear() để tránh dội bom API đồng thời
+            # Yêu cầu người dùng nhấn "Làm mới Master" thủ công để thấy thay đổi
             return True
-        except: return False
+        except Exception as e:
+            st.error(f"Lỗi ghi dữ liệu: {e}"); return False
 
     @retry_api_call()
     def get_attendance_data(self, year, month, unit_name, shift_type="Normal"):
@@ -108,17 +104,19 @@ class Database:
     def save_attendance(self, df_to_save, year, month, unit_name, shift_type="Normal"):
         sh = self._open_att_file(year)
         if not sh: return False
-        ws = sh.worksheet("Attendance_Data"); all_data = pd.DataFrame(ws.get_all_records())
-        calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
-        cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name', 'Shift_Type'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
-        df_to_save = df_to_save.reindex(columns=cols, fill_value="")
-        if not all_data.empty:
-            mask = (all_data['Month'].astype(str).str.lstrip('0') == str(month)) & (all_data['Unit_Name'] == unit_name) & (all_data['Shift_Type'] == shift_type)
-            final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True)
-        else: final_df = df_to_save
-        final_list = [final_df.columns.tolist()]
-        for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in row])
-        ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
+        try:
+            ws = sh.worksheet("Attendance_Data"); all_data = pd.DataFrame(ws.get_all_records())
+            calc_cols = ["Công sản phẩm", "Công thời gian", "Ngừng việc 100%", "Ngừng việc < 100%", "Hưởng BHXH"]
+            cols = ['Year', 'Month', 'Employee_ID', 'Employee_Name', 'Unit_Name', 'Shift_Type'] + [f'd{i}' for i in range(1, 32)] + calc_cols + ['Status']
+            df_to_save = df_to_save.reindex(columns=cols, fill_value="")
+            if not all_data.empty:
+                mask = (all_data['Month'].astype(str).str.lstrip('0') == str(month)) & (all_data['Unit_Name'] == unit_name) & (all_data['Shift_Type'] == shift_type)
+                final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True)
+            else: final_df = df_to_save
+            final_list = [final_df.columns.tolist()]
+            for r in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in r])
+            ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
+        except: return False
 
     @retry_api_call()
     def get_all_attendance_status(self, year, month):
@@ -147,7 +145,6 @@ class Database:
             return pd.DataFrame(ws.get_all_records())
         except: return pd.DataFrame()
 
-    @retry_api_call()
     def get_available_years(self):
         try:
             all_sh = self.client.openall(); years = [int(s.title.split("_")[-1]) for s in all_sh if s.title.startswith("GasTime_Attendance_")]
@@ -170,59 +167,63 @@ class Database:
             if df.empty: return "Empty"
             df['Month_Str'] = df['Month'].astype(str).str.lstrip('0')
             curr = df[df['Month_Str'] == str(month)]
-            if curr.empty: return "Not Found"
             return "Approved" if "Approved" in curr['Status'].values else "Draft"
-        except: return "Error"
+        except: return "Not Created"
 
     @retry_api_call()
     def get_payroll_data(self, year, month):
         sh = self._open_pay_file(year)
         if not sh: return pd.DataFrame()
         try:
-            ws = sh.worksheet("Payroll_Data")
-            df = pd.DataFrame(ws.get_all_records())
-            if df.empty: return pd.DataFrame()
+            ws = sh.worksheet("Payroll_Data"); df = pd.DataFrame(ws.get_all_records())
             df['Month_Match'] = df['Month'].astype(str).str.lstrip('0')
             return df[df['Month_Match'] == str(month)].drop(columns=['Month_Match'])
         except: return pd.DataFrame()
 
     @retry_api_call()
-    def save_payroll_data(self, df_to_save, year, month, status="Draft", creator="System"):
+    def save_payroll_data(self, df, year, month, status="Draft", creator="System"):
         sh = self._open_pay_file(year)
-        if not sh: st.error(f"❌ Không tìm thấy file GasTime_Payroll_{year}"); return False
+        if not sh: return False
         try:
-            ws = sh.worksheet("Payroll_Data")
-            all_data = pd.DataFrame(ws.get_all_records())
-            df_to_save['Status'] = status
-            df_to_save['Created_By'] = creator
-            df_to_save['Updated_At'] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            ws = sh.worksheet("Payroll_Data"); all_data = pd.DataFrame(ws.get_all_records())
+            df['Status'], df['Created_By'], df['Updated_At'] = status, creator, datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             if not all_data.empty:
                 all_data['Month_Str'] = all_data['Month'].astype(str).str.lstrip('0')
                 mask = (all_data['Month_Str'] == str(month))
-                final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True).drop(columns=['Month_Str'])
-            else: final_df = df_to_save
+                final_df = pd.concat([all_data[~mask], df], ignore_index=True).drop(columns=['Month_Str'])
+            else: final_df = df
             final_list = [final_df.columns.tolist()]
-            for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in row])
+            for r in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in r])
             ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
-        except Exception as e: st.error(f"Lỗi khi lưu bảng lương: {e}"); return False
-
-    @retry_api_call()
-    def update_user_password(self, username, new_password):
-        try:
-            ws = self.master_sh.worksheet("Users"); names = ws.col_values(1)
-            if username in names:
-                idx = names.index(username) + 1; ws.update_cell(idx, 2, str(new_password)); return True
-            return False
         except: return False
 
     @retry_api_call()
+    def save_payroll_inputs(self, df, year, month):
+        try:
+            ws = self.master_sh.worksheet("Payroll_Inputs"); all_data = pd.DataFrame(ws.get_all_records())
+            if not all_data.empty:
+                all_data['Month_Str'] = all_data['Month'].astype(str).str.lstrip('0')
+                mask = (all_data['Month_Str'] == str(month)) & (all_data['Year'].astype(str) == str(year))
+                final_df = pd.concat([all_data[~mask], df], ignore_index=True).drop(columns=['Month_Str'])
+            else: final_df = df
+            final_list = [final_df.columns.tolist()]
+            for r in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in r])
+            ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
+        except: return False
+
+    def update_user_password(self, u, p):
+        try:
+            ws = self.master_sh.worksheet("Users"); names = ws.col_values(1)
+            if u in names: ws.update_cell(names.index(u)+1, 2, str(p)); return True
+            return False
+        except: return False
+
     def update_concurrent_assignment(self, emp_id, name, u_id, u_name, pos):
         try:
             ws = self.master_sh.worksheet("Concurrent_Assignments")
             ws.append_row([self._clean_for_sheets(emp_id), name, u_id, u_name, pos, datetime.now().strftime("%d/%m/%Y")], value_input_option='USER_ENTERED'); return True
         except: return False
 
-    @retry_api_call()
     def delete_concurrent_assignment(self, emp_id, u_id):
         try:
             ws = self.master_sh.worksheet("Concurrent_Assignments"); data = ws.get_all_values()
@@ -230,21 +231,6 @@ class Database:
                 if str(row[0]).strip() == str(emp_id).strip() and str(row[2]).strip() == str(u_id).strip():
                     ws.delete_rows(i + 1); return True
             return False
-        except: return False
-
-    @retry_api_call()
-    def save_payroll_inputs(self, df_to_save, year, month):
-        try:
-            ws = self.master_sh.worksheet("Payroll_Inputs")
-            all_data = pd.DataFrame(ws.get_all_records())
-            if not all_data.empty:
-                all_data['Month_Str'] = all_data['Month'].astype(str).str.lstrip('0')
-                mask = (all_data['Month_Str'] == str(month)) & (all_data['Year'].astype(str) == str(year))
-                final_df = pd.concat([all_data[~mask], df_to_save], ignore_index=True).drop(columns=['Month_Str'])
-            else: final_df = df_to_save
-            final_list = [final_df.columns.tolist()]
-            for row in final_df.values.tolist(): final_list.append([self._clean_for_sheets(v) for v in row])
-            ws.clear(); ws.update(final_list, value_input_option='USER_ENTERED'); return True
         except: return False
 
 def init_db():
